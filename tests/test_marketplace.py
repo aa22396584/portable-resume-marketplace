@@ -105,6 +105,11 @@ class MarketplaceTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 0, f"{runner}: {completed.stdout}")
                 self.assertIn("portable-resume", completed.stdout.lower())
 
+    def test_cursor_install_instruction_matches_current_cli(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("run `/plugin` in Cursor Agent", readme)
+        self.assertNotIn("/add-plugin", readme)
+
     def test_repository_copy_is_deterministic(self):
         before = {}
         for path in ROOT.rglob("*"):

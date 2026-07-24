@@ -25,7 +25,7 @@ codex plugin add portable-resume@portable-resume
 cursor-agent plugin marketplace add https://github.com/ImL1s/portable-resume-marketplace --git-ref main
 ```
 
-Then run `/add-plugin portable-resume` in Cursor Agent.
+Then run `/plugin` in Cursor Agent, open **Marketplace**, search for `portable-resume`, and install it for user scope.
 
 ### Qwen Code
 
