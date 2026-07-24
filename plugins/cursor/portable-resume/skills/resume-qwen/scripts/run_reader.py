@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Bootstrap the owned portable-resume runtime for source=qwen."""
+
+from __future__ import annotations
+
+import os
+import sys
+
+# <skill>/scripts/run_reader.py -> <skill-root>/.portable-resume/runtime
+_SKILL_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+_ROOT = os.path.dirname(_SKILL_DIR)
+_RUNTIME = os.path.join(_ROOT, ".portable-resume", "runtime")
+if _RUNTIME not in sys.path:
+    sys.path.insert(0, _RUNTIME)
+
+from portable_resume.reader import main  # noqa: E402
+
+
+def _force_expected_source(argv: list[str]) -> list[str]:
+    """Hard-bind the skill source; accept Grok-style `show|list [ref]` argv.
+
+    Strip host-supplied ``--expected-source`` overrides, then ensure the first
+    positional is the bound source. If the skill is invoked as
+    ``run_reader.py show latest`` (Grok resume-session style), inject the
+    bound source so the shared reader sees ``<source> show latest``.
+    """
+    forced = "qwen"
+    cleaned: list[str] = []
+    skip_next = False
+    for item in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if item == "--expected-source":
+            skip_next = True
+            continue
+        if item.startswith("--expected-source="):
+            continue
+        cleaned.append(item)
+    if cleaned and cleaned[0] in {"list", "show"}:
+        cleaned = [forced, *cleaned]
+    elif cleaned and cleaned[0] != forced and cleaned[0] not in {
+        "-h",
+        "--help",
+        "--request-file",
+    } and not cleaned[0].startswith("--"):
+        # Reject attempts to run a different source through this bound skill.
+        cleaned = [forced, *cleaned[1:]] if cleaned[0] in {
+            "claude",
+            "codex",
+            "cursor",
+            "opencode",
+            "antigravity",
+            "grok",
+            "kimi",
+            "qwen",
+        } else [forced, *cleaned]
+    cleaned.extend(["--expected-source", forced])
+    return cleaned
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(_force_expected_source(sys.argv[1:])))

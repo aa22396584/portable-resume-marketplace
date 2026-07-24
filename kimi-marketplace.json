@@ -1,0 +1,11 @@
+{
+  "version": "2",
+  "plugins": [
+    {
+      "id": "portable-resume",
+      "displayName": "Portable Resume",
+      "description": "Offline, inert context migration across supported coding agents",
+      "source": "https://github.com/ImL1s/resume-skills/releases/download/v0.3.2/portable-resume-0.3.2-kimi-plugin.zip"
+    }
+  ]
+}

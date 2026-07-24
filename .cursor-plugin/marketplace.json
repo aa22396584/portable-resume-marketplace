@@ -1,0 +1,16 @@
+{
+  "metadata": {
+    "description": "Offline, inert context migration across supported coding agents"
+  },
+  "name": "portable-resume",
+  "owner": {
+    "name": "portable-resume-skills contributors"
+  },
+  "plugins": [
+    {
+      "description": "Offline, inert context migration across supported coding agents",
+      "name": "portable-resume",
+      "source": "plugins/cursor/portable-resume"
+    }
+  ]
+}

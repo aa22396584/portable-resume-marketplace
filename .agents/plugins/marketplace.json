@@ -1,0 +1,20 @@
+{
+  "interface": {
+    "displayName": "Portable Resume"
+  },
+  "name": "portable-resume",
+  "plugins": [
+    {
+      "category": "Developer Tools",
+      "name": "portable-resume",
+      "policy": {
+        "authentication": "ON_INSTALL",
+        "installation": "AVAILABLE"
+      },
+      "source": {
+        "path": "./plugins/codex/portable-resume",
+        "source": "local"
+      }
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+name: Sync upstream release
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable upstream tag; blank means latest release
+        required: false
+        type: string
+  repository_dispatch:
+    types: [portable-resume-release]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: marketplace-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Synchronize published release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          tag="${INPUT_TAG:-${DISPATCH_TAG:-}}"
+          if [ -n "$tag" ]; then
+            python3 scripts/sync_release.py --tag "$tag"
+          else
+            python3 scripts/sync_release.py
+          fi
+      - run: python3 -m unittest discover -s tests -q
+      - run: git diff --check
+      - name: Commit synchronized catalog
+        id: publish
+        run: |
+          version="$(python3 -c 'import json; print(json.load(open("release-index.json"))["version"])')"
+          tag="v$version"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .claude-plugin .agents .cursor-plugin plugins kimi-marketplace.json release-index.json README.md
+          if ! git diff --cached --quiet; then
+            git commit -m "release: synchronize $tag"
+            git push origin HEAD:main
+          fi
+          if ! git rev-parse "$tag" >/dev/null 2>&1 && ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            git tag -a "$tag" -m "Portable Resume marketplace $tag"
+            git push origin "$tag"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
