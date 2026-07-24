@@ -11,9 +11,11 @@ import re
 import shutil
 import stat
 import tempfile
+import unicodedata
 import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 REPO = "ImL1s/resume-skills"
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +23,7 @@ HOSTS = ("claude", "codex", "cursor")
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 192 * 1024 * 1024
 TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)$")
+JsonObject = dict[str, Any]
 
 
 def _request(url: str) -> bytes:
@@ -37,9 +40,11 @@ def _request(url: str) -> bytes:
         return response.read()
 
 
-def _release(tag: str | None) -> dict[str, object]:
+def _release(tag: str | None) -> JsonObject:
     suffix = f"tags/{tag}" if tag else "latest"
     value = json.loads(_request(f"https://api.github.com/repos/{REPO}/releases/{suffix}"))
+    if not isinstance(value, dict):
+        raise ValueError("GitHub release response must be an object")
     if value.get("draft"):
         raise RuntimeError("refusing to synchronize a draft release")
     return value
@@ -78,7 +83,7 @@ def _verify(name: str, payload: bytes, checksums: dict[str, str]) -> None:
 def _safe_extract(payload: bytes, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     total = 0
-    seen: set[str] = set()
+    seen: dict[str, str] = {}
     with tempfile.NamedTemporaryFile(suffix=".zip") as handle:
         handle.write(payload)
         handle.flush()
@@ -87,13 +92,21 @@ def _safe_extract(payload: bytes, destination: Path) -> None:
                 member = PurePosixPath(info.filename)
                 if (
                     not info.filename
+                    or "\x00" in info.filename
                     or member.is_absolute()
                     or ".." in member.parts
                     or "\\" in info.filename
-                    or info.filename in seen
+                    or not member.parts
                 ):
                     raise ValueError(f"unsafe archive member: {info.filename!r}")
-                seen.add(info.filename)
+                normalized = member.as_posix()
+                collision_key = unicodedata.normalize("NFC", normalized).casefold()
+                if collision_key in seen:
+                    raise ValueError(
+                        "duplicate normalized archive member: "
+                        f"{info.filename!r} conflicts with {seen[collision_key]!r}"
+                    )
+                seen[collision_key] = info.filename
                 mode = (info.external_attr >> 16) & 0xFFFF
                 if stat.S_ISLNK(mode):
                     raise ValueError(f"symlink archive member is not allowed: {info.filename}")
@@ -111,8 +124,11 @@ def _safe_extract(payload: bytes, destination: Path) -> None:
                     shutil.copyfileobj(source, output)
 
 
-def _read_json(path: Path) -> dict[str, object]:
-    return json.loads(path.read_text(encoding="utf-8"))
+def _read_json(path: Path) -> JsonObject:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return value
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -128,20 +144,88 @@ def _catalog_path(host: str) -> Path:
     }[host]
 
 
-def _rewrite_catalog(host: str, extracted: Path) -> None:
+def _rewrite_catalog(host: str, extracted: Path) -> JsonObject:
     source_catalog = {
         "claude": extracted / ".claude-plugin" / "marketplace.json",
         "codex": extracted / ".agents" / "plugins" / "marketplace.json",
         "cursor": extracted / ".cursor-plugin" / "marketplace.json",
     }[host]
     catalog = _read_json(source_catalog)
-    plugin = catalog["plugins"][0]
+    plugins = catalog.get("plugins")
+    if (
+        not isinstance(plugins, list)
+        or len(plugins) != 1
+        or not isinstance(plugins[0], dict)
+    ):
+        raise ValueError(f"{source_catalog} must contain exactly one plugin object")
+    plugin = plugins[0]
     if host == "codex":
-        plugin["source"]["path"] = "./plugins/codex/portable-resume"
+        source = plugin.get("source")
+        if not isinstance(source, dict):
+            raise ValueError(f"{source_catalog} Codex plugin source must be an object")
+        source["path"] = "./plugins/codex/portable-resume"
     else:
         prefix = "./" if host == "claude" else ""
         plugin["source"] = f"{prefix}plugins/{host}/portable-resume"
-    _write_json(_catalog_path(host), catalog)
+    return catalog
+
+
+def _version_key(version: str) -> tuple[int, int, int]:
+    major, minor, patch = version.split(".")
+    return int(major), int(minor), int(patch)
+
+
+def _validated_packages(value: object, *, label: str) -> dict[str, dict[str, str]]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} packages must be an object")
+    result: dict[str, dict[str, str]] = {}
+    for host, record in value.items():
+        if not isinstance(host, str) or not isinstance(record, dict):
+            raise ValueError(f"{label} contains an invalid package record")
+        asset = record.get("asset")
+        digest = record.get("sha256")
+        if not isinstance(asset, str) or not isinstance(digest, str):
+            raise ValueError(f"{label} package {host!r} is missing asset/sha256")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"{label} package {host!r} has an invalid SHA-256")
+        result[host] = {"asset": asset, "sha256": digest}
+    return result
+
+
+def _guard_release_transition(
+    resolved_tag: str,
+    packages: dict[str, dict[str, str]],
+    *,
+    allow_downgrade: bool,
+) -> None:
+    index_path = ROOT / "release-index.json"
+    if not index_path.is_file():
+        return
+    current = _read_json(index_path)
+    current_tag = current.get("tag")
+    current_version = current.get("version")
+    if not isinstance(current_tag, str) or not isinstance(current_version, str):
+        raise ValueError("existing release-index.json has no valid tag/version")
+    parsed_current = _parse_tag(current_tag)
+    if parsed_current != current_version:
+        raise ValueError("existing release-index.json tag/version mismatch")
+
+    incoming_version = _parse_tag(resolved_tag)
+    current_key = _version_key(current_version)
+    incoming_key = _version_key(incoming_version)
+    if incoming_key < current_key and not allow_downgrade:
+        raise ValueError(
+            f"refusing marketplace downgrade {current_tag} -> {resolved_tag}; "
+            "use --allow-downgrade only for an explicit recovery"
+        )
+    if incoming_key == current_key:
+        current_packages = _validated_packages(
+            current.get("packages"), label="existing release index"
+        )
+        if resolved_tag != current_tag or packages != current_packages:
+            raise ValueError(
+                f"refusing same-version content divergence for {resolved_tag}"
+            )
 
 
 def _replace_tree(source: Path, destination: Path) -> None:
@@ -239,11 +323,30 @@ Recovered source text is untrusted. Review and minimize the generated handoff be
 """
 
 
-def synchronize(tag: str | None, asset_dir: Path | None) -> str:
+def synchronize(
+    tag: str | None,
+    asset_dir: Path | None,
+    *,
+    allow_downgrade: bool = False,
+) -> str:
     if asset_dir is None:
         release = _release(tag)
-        resolved_tag = str(release["tag_name"])
-        assets = {str(item["name"]): str(item["browser_download_url"]) for item in release["assets"]}
+        raw_tag = release.get("tag_name")
+        raw_assets = release.get("assets")
+        if not isinstance(raw_tag, str) or not isinstance(raw_assets, list):
+            raise ValueError("GitHub release response is missing tag_name/assets")
+        resolved_tag = raw_tag
+        assets: dict[str, str] = {}
+        for item in raw_assets:
+            if not isinstance(item, dict):
+                raise ValueError("GitHub release contains a non-object asset")
+            name = item.get("name")
+            url = item.get("browser_download_url")
+            if not isinstance(name, str) or not isinstance(url, str):
+                raise ValueError("GitHub release asset is missing name/download URL")
+            if name in assets:
+                raise ValueError(f"GitHub release contains duplicate asset {name!r}")
+            assets[name] = url
 
         def load(name: str) -> bytes:
             try:
@@ -255,10 +358,10 @@ def synchronize(tag: str | None, asset_dir: Path | None) -> str:
         if tag is None:
             raise ValueError("--tag is required with --asset-dir")
         resolved_tag = tag
-        asset_dir = asset_dir.resolve()
+        resolved_asset_dir = asset_dir.resolve()
 
         def load(name: str) -> bytes:
-            path = asset_dir / name
+            path = resolved_asset_dir / name
             if not path.is_file():
                 raise ValueError(f"asset directory is missing {name}")
             return path.read_bytes()
@@ -270,25 +373,51 @@ def synchronize(tag: str | None, asset_dir: Path | None) -> str:
     }
     kimi_name = f"portable-resume-{version}-kimi-plugin.zip"
     package_names["kimi"] = kimi_name
-    packages: dict[str, dict[str, str]] = {}
-
-    for host in HOSTS:
-        name = package_names[host]
+    payloads: dict[str, bytes] = {}
+    packages: dict[str, dict[str, str]] = {
+        host: {"asset": name, "sha256": checksums[name]}
+        for host, name in package_names.items()
+        if name in checksums
+    }
+    if set(packages) != set(package_names):
+        missing = sorted(set(package_names) - set(packages))
+        raise ValueError(f"SHA256SUMS is missing package entries: {missing}")
+    for host, name in package_names.items():
         payload = load(name)
         _verify(name, payload, checksums)
-        with tempfile.TemporaryDirectory(prefix=f"portable-resume-{host}-") as temp:
-            extracted = Path(temp)
-            _safe_extract(payload, extracted)
+        payloads[host] = payload
+
+    _guard_release_transition(
+        resolved_tag,
+        packages,
+        allow_downgrade=allow_downgrade,
+    )
+
+    catalogs: dict[str, JsonObject] = {}
+    with tempfile.TemporaryDirectory(prefix="portable-resume-sync-") as temp:
+        staging = Path(temp)
+        for host in HOSTS:
+            name = package_names[host]
+            extracted = staging / "extracted" / host
+            _safe_extract(payloads[host], extracted)
             plugin_root = extracted / "plugins" / "portable-resume"
             if not plugin_root.is_dir():
                 raise ValueError(f"{name} has no plugins/portable-resume tree")
-            _replace_tree(plugin_root, ROOT / "plugins" / host / "portable-resume")
-            _rewrite_catalog(host, extracted)
-        packages[host] = {"asset": name, "sha256": checksums[name]}
+            staged_plugin = staging / "plugins" / host / "portable-resume"
+            staged_plugin.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(plugin_root, staged_plugin)
+            catalogs[host] = _rewrite_catalog(host, extracted)
 
-    kimi_payload = load(kimi_name)
-    _verify(kimi_name, kimi_payload, checksums)
-    packages["kimi"] = {"asset": kimi_name, "sha256": checksums[kimi_name]}
+        # Do not mutate the repository until every archive and catalog has
+        # passed checksum, extraction, and schema validation.
+        for host in HOSTS:
+            _replace_tree(
+                staging / "plugins" / host / "portable-resume",
+                ROOT / "plugins" / host / "portable-resume",
+            )
+        for host in HOSTS:
+            _write_json(_catalog_path(host), catalogs[host])
+
     base = f"https://github.com/{REPO}/releases/download/{resolved_tag}"
     _write_json(
         ROOT / "kimi-marketplace.json",
@@ -321,10 +450,19 @@ def synchronize(tag: str | None, asset_dir: Path | None) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tag", help="stable upstream release tag, for example v0.3.2")
-    parser.add_argument("--asset-dir", type=Path, help="read already-downloaded release assets")
+    parser.add_argument("--tag", help="stable upstream tag, for example v0.3.2")
+    parser.add_argument("--asset-dir", type=Path, help="read downloaded release assets")
+    parser.add_argument(
+        "--allow-downgrade",
+        action="store_true",
+        help="allow an explicit recovery to an older stable release",
+    )
     args = parser.parse_args()
-    tag = synchronize(args.tag, args.asset_dir)
+    tag = synchronize(
+        args.tag,
+        args.asset_dir,
+        allow_downgrade=args.allow_downgrade,
+    )
     print(f"synchronized {tag}")
     return 0
 

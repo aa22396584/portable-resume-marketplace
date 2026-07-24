@@ -41,6 +41,18 @@ jobs:
           else
             python3 scripts/sync_release.py
           fi
+      - name: Verify immutable existing tag index
+        run: |
+          tag="$(python3 -c 'import json; print(json.load(open("release-index.json"))["tag"])')"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            tagged_index="$(mktemp)"
+            git show "$tag:release-index.json" > "$tagged_index"
+            if ! cmp -s "$tagged_index" release-index.json; then
+              diff -u "$tagged_index" release-index.json || true
+              echo "existing tag $tag does not match generated release-index.json" >&2
+              exit 1
+            fi
+          fi
       - run: python3 -m unittest discover -s tests -q
       - run: git diff --check
       - name: Commit synchronized catalog
