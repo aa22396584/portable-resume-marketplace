@@ -20,6 +20,7 @@ from typing import Any
 REPO = "ImL1s/resume-skills"
 ROOT = Path(__file__).resolve().parents[1]
 HOSTS = ("claude", "codex", "cursor")
+MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 192 * 1024 * 1024
 TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)$")
@@ -37,7 +38,18 @@ def _request(url: str) -> bytes:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=60) as response:
-        return response.read()
+        raw_length = response.headers.get("Content-Length")
+        if raw_length is not None:
+            try:
+                content_length = int(raw_length)
+            except ValueError as exc:
+                raise ValueError("download has an invalid Content-Length") from exc
+            if content_length < 0 or content_length > MAX_DOWNLOAD_BYTES:
+                raise ValueError("download exceeds the compressed size limit")
+        payload = response.read(MAX_DOWNLOAD_BYTES + 1)
+        if len(payload) > MAX_DOWNLOAD_BYTES:
+            raise ValueError("download exceeds the compressed size limit")
+        return payload
 
 
 def _release(tag: str | None) -> JsonObject:

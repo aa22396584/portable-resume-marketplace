@@ -205,6 +205,39 @@ class MarketplaceTests(unittest.TestCase):
 
 
 class SynchronizationSecurityTests(unittest.TestCase):
+    def test_request_rejects_declared_or_streamed_oversize_downloads(self):
+        class Response(io.BytesIO):
+            def __init__(self, payload: bytes, content_length: str | None):
+                super().__init__(payload)
+                self.headers = {}
+                if content_length is not None:
+                    self.headers["Content-Length"] = content_length
+
+        cases = (
+            ("declared", Response(b"x", "4")),
+            ("streamed", Response(b"xxxx", None)),
+        )
+        for label, response in cases:
+            with (
+                self.subTest(label=label),
+                mock.patch.object(SYNC, "MAX_DOWNLOAD_BYTES", 3),
+                mock.patch.object(SYNC.urllib.request, "urlopen", return_value=response),
+            ):
+                with self.assertRaisesRegex(ValueError, "compressed size limit"):
+                    SYNC._request("https://example.invalid/asset.zip")
+
+    def test_request_rejects_invalid_content_length(self):
+        class Response(io.BytesIO):
+            headers = {"Content-Length": "not-an-integer"}
+
+        with mock.patch.object(
+            SYNC.urllib.request,
+            "urlopen",
+            return_value=Response(b"x"),
+        ):
+            with self.assertRaisesRegex(ValueError, "invalid Content-Length"):
+                SYNC._request("https://example.invalid/asset.zip")
+
     def test_checksum_mismatch_fails_before_repository_mutation(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
