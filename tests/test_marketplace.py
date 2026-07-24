@@ -110,6 +110,20 @@ class MarketplaceTests(unittest.TestCase):
         self.assertIn("run `/plugin` in Cursor Agent", readme)
         self.assertNotIn("/add-plugin", readme)
 
+    def test_readme_keeps_localized_docs_and_explicit_qwen_scope(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for locale in (
+            "ar", "de", "en", "es", "fr", "hi", "ja", "ko", "pt-BR", "ru",
+            "zh-CN", "zh-TW",
+        ):
+            self.assertIn(f"/docs/i18n/{locale}.md", readme)
+        self.assertIn(
+            "qwen extensions install "
+            "ImL1s/portable-resume-marketplace:portable-resume "
+            "--consent --scope user",
+            readme,
+        )
+
     def test_repository_copy_is_deterministic(self):
         before = {}
         for path in ROOT.rglob("*"):

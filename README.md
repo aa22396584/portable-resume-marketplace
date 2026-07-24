@@ -3,6 +3,20 @@
 Public, host-native catalogs for [Portable Resume](https://github.com/ImL1s/resume-skills) **0.3.2**.
 The packaged readers run locally, use only Python's standard library, and emit inert, untrusted handoff text for a fresh session. They do not restore a live process or contact the network.
 
+Documentation:
+[English](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/en.md) ·
+[繁體中文](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/zh-TW.md) ·
+[简体中文](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/zh-CN.md) ·
+[日本語](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/ja.md) ·
+[한국어](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/ko.md) ·
+[Español](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/es.md) ·
+[Português](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/pt-BR.md) ·
+[Français](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/fr.md) ·
+[Deutsch](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/de.md) ·
+[Русский](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/ru.md) ·
+[العربية](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/ar.md) ·
+[हिन्दी](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/hi.md)
+
 ## Install
 
 ### Claude Code
@@ -31,7 +45,7 @@ Then run `/plugin` in Cursor Agent, open **Marketplace**, search for `portable-r
 
 ```bash
 qwen extensions sources add ImL1s/portable-resume-marketplace
-qwen extensions install ImL1s/portable-resume-marketplace:portable-resume --consent
+qwen extensions install ImL1s/portable-resume-marketplace:portable-resume --consent --scope user
 ```
 
 ### Grok CLI
