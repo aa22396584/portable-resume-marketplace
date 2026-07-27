@@ -13,5 +13,5 @@
   "name": "portable-resume",
   "repository": "https://github.com/ImL1s/resume-skills",
   "skills": "./skills/",
-  "version": "0.3.3"
+  "version": "0.3.4"
 }

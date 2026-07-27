@@ -115,10 +115,10 @@ class MarketplaceTests(unittest.TestCase):
                 self.assertEqual(manifest["name"], "portable-resume")
                 self.assertEqual(manifest["version"], self.version)
 
-    def test_each_plugin_contains_eight_skills(self):
+    def test_each_plugin_contains_nine_skills(self):
         expected = {
             "resume-antigravity", "resume-claude", "resume-codex", "resume-cursor",
-            "resume-grok", "resume-kimi", "resume-opencode", "resume-qwen",
+            "resume-grok", "resume-kimi", "resume-opencode", "resume-pi", "resume-qwen",
         }
         for host in HOSTS:
             skills = ROOT / "plugins" / host / "portable-resume" / "skills"
