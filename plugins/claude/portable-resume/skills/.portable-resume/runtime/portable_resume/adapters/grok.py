@@ -23,7 +23,7 @@ from ..diagnostics import DiagnosticError
 from ..model import Query, Session, SessionSummary, Turn
 from ..paths import canonical_root, canonicalize_cwd, is_within, same_cwd
 from ..sanitize import sanitize_turn_record
-from ..snapshot import stable_read_bytes
+from ..snapshot import stable_read_bytes, stable_scan_lines
 
 FORMAT_ID = "grok-updates-jsonl-v1"
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,1023}$")
@@ -72,19 +72,45 @@ def _loads(data: bytes, *, optional: bool = False) -> Any:
     return value
 
 
-def _shape(value: Any, depth: int = 0) -> None:
+def _shape(
+    value: Any,
+    depth: int = 0,
+    *,
+    path: tuple[str, ...] = (),
+    ignored_list_cardinality: bool = False,
+) -> None:
     if depth > 32:
         raise DiagnosticError.limit_exceeded()
     if isinstance(value, Mapping):
         if len(value) > 512:
             raise DiagnosticError.limit_exceeded()
-        for item in value.values():
-            _shape(item, depth + 1)
+        for key, item in value.items():
+            child_path = (*path, str(key))
+            # ``rawOutput`` is provider-private and never normalized. Its JSONL
+            # record is already byte-bounded, while depth and map-width checks
+            # still recurse through it. Do not borrow the discovery-row ceiling
+            # for ignored provider arrays (#178).
+            child_ignored = ignored_list_cardinality or child_path == (
+                "params",
+                "update",
+                "rawOutput",
+            )
+            _shape(
+                item,
+                depth + 1,
+                path=child_path,
+                ignored_list_cardinality=child_ignored,
+            )
     elif isinstance(value, list):
-        if len(value) > DEFAULT_BOUNDS.scanned_records:
+        if not ignored_list_cardinality and len(value) > DEFAULT_BOUNDS.scanned_records:
             raise DiagnosticError.limit_exceeded()
         for item in value:
-            _shape(item, depth + 1)
+            _shape(
+                item,
+                depth + 1,
+                path=path,
+                ignored_list_cardinality=ignored_list_cardinality,
+            )
 
 
 def _identifier(value: object) -> str:
@@ -299,21 +325,8 @@ class GrokAdapter:
         for cwd_dir, updates in paths:
             session_id = _identifier(os.path.basename(os.path.dirname(updates)))
             cwd = self._decode_cwd(cwd_dir, root, budget)
-            try:
-                event_meta, _, event_warnings = self._parse_updates(
-                    updates,
-                    root,
-                    query,
-                    budget,
-                    include_turns=False,
-                    expected_id=session_id,
-                )
-            except DiagnosticError as error:
-                # Oversized live updates.jsonl: still list via path + summary.json.
-                # Corrupt/unsupported content stays fail-closed (fixture contract).
-                if error.code != "E_LIMIT_EXCEEDED":
-                    raise
-                event_meta, event_warnings = {}, ("W_TRUNCATED",)
+            # Metadata-first list (#15): prefer summary.json + path/mtime. Do not
+            # parse every update line merely to list a session.
             summary, summary_warnings = self._summary(
                 os.path.dirname(updates),
                 root,
@@ -324,13 +337,45 @@ class GrokAdapter:
             title = summary.get("title") if isinstance(summary.get("title"), str) else None
             summary_cwd = summary.get("cwd") if isinstance(summary.get("cwd"), str) else cwd
             branch = summary.get("branch") if isinstance(summary.get("branch"), str) else None
-            warnings = tuple(dict.fromkeys((*event_warnings, *summary_warnings)))
             created = summary.get("created_at") if isinstance(summary.get("created_at"), str) else None
-            updated = summary.get("updated_at") if isinstance(summary.get("updated_at"), str) else None
-            if created is None and isinstance(event_meta, tuple) and len(event_meta) > 0:
-                created = event_meta[0]
-            if updated is None and isinstance(event_meta, tuple) and len(event_meta) > 1:
-                updated = event_meta[1]
+            # List freshness always prefers updates.jsonl mtime so a stale
+            # summary.json last_active_at cannot hide active sessions (#15).
+            event_warnings: list[str] = []
+            updated: str | None = None
+            try:
+                st = os.lstat(updates)
+                stamp = datetime.fromtimestamp(
+                    st.st_mtime, timezone.utc
+                ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+            except OSError:
+                stamp = None
+            if stamp is not None:
+                updated = stamp
+                if created is None:
+                    created = stamp
+            elif "W_MISSING_BLOB" in summary_warnings:
+                # No mtime: fall back to a bounded updates stream only when
+                # metadata is otherwise unusable.
+                try:
+                    event_meta, _, event_warnings = self._parse_updates(
+                        updates,
+                        root,
+                        query,
+                        budget,
+                        include_turns=False,
+                        expected_id=session_id,
+                    )
+                    if created is None and isinstance(event_meta, tuple) and len(event_meta) > 0:
+                        created = event_meta[0]
+                    if isinstance(event_meta, tuple) and len(event_meta) > 1:
+                        updated = event_meta[1]
+                except DiagnosticError as error:
+                    if error.code != "E_LIMIT_EXCEEDED":
+                        raise
+                    event_warnings = ["W_TRUNCATED"]
+            if updated is None and isinstance(summary.get("updated_at"), str):
+                updated = summary["updated_at"]
+            warnings = tuple(dict.fromkeys((*event_warnings, *summary_warnings)))
             item = SessionSummary(
                 source=self.key,
                 session_id=session_id,
@@ -473,26 +518,36 @@ class GrokAdapter:
         include_turns: bool,
         expected_id: str,
     ) -> tuple[tuple[str | None, str | None], list[Turn], list[str]]:
-        read = stable_read_bytes(path, root=root, budget=budget, hook=self._read_hook)
-        lines = read.data.split(b"\n")
-        trailing_fragment = bool(lines and lines[-1])
-        nonempty = [(index, raw.strip()) for index, raw in enumerate(lines) if raw.strip()]
+        # Stream via stable_scan_lines under source_read_bytes + transcript_records
+        # so large updates.jsonl is not whole-file buffered (#10).
         warnings: list[str] = []
         turns: list[Turn] = []
         timestamps: list[str] = []
         recognized = 0
-        for position, (line_index, raw) in enumerate(nonempty):
+        for line in stable_scan_lines(
+            path,
+            root=root,
+            budget=budget,
+            charge_transcript=True,
+            hook=self._read_hook,
+        ):
+            if not line.utf8_valid:
+                if not line.terminated:
+                    warnings.append("W_PARTIAL_TAIL")
+                    break
+                raise DiagnosticError("E_CORRUPT_RECORD", source=self.key, provider=FORMAT_ID)
+            raw = line.text.strip()
+            if not raw:
+                continue
             try:
-                value = _loads(raw)
+                value = _loads(raw.encode("utf-8"))
             except DiagnosticError:
-                is_tail = position == len(nonempty) - 1 and trailing_fragment and line_index == len(lines) - 1
-                if is_tail:
+                if not line.terminated:
                     warnings.append("W_PARTIAL_TAIL")
                     continue
                 raise
             if not isinstance(value, Mapping):
                 raise DiagnosticError("E_CORRUPT_RECORD", source=self.key, provider=FORMAT_ID)
-            budget.consume_records()
             timestamp = _timestamp(value.get("timestamp"))
             if timestamp is not None:
                 timestamps.append(timestamp)
@@ -509,7 +564,8 @@ class GrokAdapter:
             if not isinstance(kind, str):
                 raise DiagnosticError("E_UNSUPPORTED_FORMAT", source=self.key, provider=FORMAT_ID)
             kind = kind.casefold()
-            if _contains_encrypted(update):
+            public_update = {key: item for key, item in update.items() if key != "rawOutput"}
+            if _contains_encrypted(public_update):
                 recognized += 1
                 continue
             if kind in _ESSENTIAL_UNSUPPORTED:

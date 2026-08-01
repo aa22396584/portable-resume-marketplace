@@ -22,8 +22,14 @@ from typing import Any, Iterable, Mapping
 from ..bounds import DEFAULT_BOUNDS, ReadBudget
 from ..diagnostics import DiagnosticError
 from ..model import Query, Session, SessionSummary, Turn
-from ..paths import canonical_root, canonicalize_cwd, same_cwd
-from ..sanitize import sanitize_turn_record
+from ..paths import (
+    canonical_root,
+    canonicalize_cwd,
+    is_within,
+    require_regular_no_symlinks,
+    same_cwd,
+)
+from ..sanitize import sanitize_text, sanitize_turn_record
 from ..snapshot import FileSnapshot, StableWindows, snapshot_regular_file, stable_read_windows
 from .base import CapabilityReport, ResolvedRef
 
@@ -239,7 +245,18 @@ def _bounded_names(directory: str, *, limit: int) -> list[str]:
     return values
 
 
-def _project_dirs(root: str, *, prefer_slugs: tuple[str, ...] = ()) -> list[str]:
+def _project_dirs(
+    root: str,
+    *,
+    prefer_slugs: tuple[str, ...] = (),
+    prefer_only: bool = False,
+) -> list[str]:
+    """Return project directories under ``<root>/projects``.
+
+    When *prefer_only* is true, only the preferred cwd-slug directories are
+    considered — the projects tree is not enumerated. This keeps exact UUID +
+    cwd discovery off the broad ``_PROJECT_DIR_LIMIT`` / scandir path.
+    """
     projects = os.path.join(root, "projects")
     if not _regular_directory(projects, root):
         return []
@@ -252,6 +269,8 @@ def _project_dirs(root: str, *, prefer_slugs: tuple[str, ...] = ()) -> list[str]
         if _regular_directory(candidate, root):
             preferred.append(candidate)
             seen.add(slug)
+    if prefer_only:
+        return preferred
     names = _bounded_names(projects, limit=DEFAULT_BOUNDS.scanned_records)
     others: list[str] = []
     for name in names:
@@ -266,25 +285,181 @@ def _project_dirs(root: str, *, prefer_slugs: tuple[str, ...] = ()) -> list[str]
     return preferred + others
 
 
-def _session_paths(
-    root: str,
-    *,
-    prefer_slugs: tuple[str, ...] = (),
-    exact_uuid: str | None = None,
-    cwd_scoped: bool = False,
-) -> list[str]:
-    """Enumerate session JSONL paths.
+def _session_layout_ok(path: str, root: str) -> bool:
+    """True when *path* is ``projects/<slug>/<uuid>.jsonl`` under *root*."""
 
-    When *cwd_scoped* and a preferred slug directory exists, only that project
-    directory is scanned (Grok-build list behavior for a concrete cwd). Exact
-    UUID lookup still falls back to a broader scan when the slug dir misses.
-    """
-    project_dirs = _project_dirs(root, prefer_slugs=prefer_slugs)
-    if cwd_scoped and prefer_slugs:
-        scoped = [path for path in project_dirs if os.path.basename(path) in prefer_slugs]
-        if scoped:
-            project_dirs = scoped
+    if not is_within(path, root):
+        return False
+    relative = os.path.relpath(path, root)
+    parts = relative.split(os.sep)
+    if len(parts) != 3 or parts[0] != "projects" or not parts[1]:
+        return False
+    basename = parts[2]
+    if not basename.endswith(".jsonl"):
+        return False
+    try:
+        uuid.UUID(basename[:-6])
+    except ValueError:
+        return False
+    return True
+
+
+def _regular_session_file(path: str) -> bool:
+    try:
+        current = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(current.st_mode) and not stat.S_ISLNK(current.st_mode)
+
+
+def _direct_uuid_under_slugs(
+    root: str,
+    exact_uuid: str,
+    prefer_slugs: tuple[str, ...],
+) -> list[str]:
+    """Return existing ``projects/<slug>/<uuid>.jsonl`` paths without tree scans."""
+
+    projects = os.path.join(root, "projects")
+    if not _regular_directory(projects, root):
+        return []
     values: list[str] = []
+    seen: set[str] = set()
+    for slug in prefer_slugs:
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        project = os.path.join(projects, slug)
+        if not _regular_directory(project, root):
+            continue
+        candidate = os.path.join(project, f"{exact_uuid}.jsonl")
+        if _regular_session_file(candidate):
+            values.append(candidate)
+    return values
+
+
+def _lexical_under_root(path: str, root: str) -> bool:
+    """True when *path* is lexically under *root* (abspath spellings only)."""
+
+    try:
+        relative = os.path.relpath(os.path.abspath(path), os.path.abspath(root))
+    except ValueError:
+        return False
+    return relative != os.pardir and not relative.startswith(os.pardir + os.sep) and not os.path.isabs(relative)
+
+
+def _lexical_session_shape(path: str, root: str) -> bool:
+    """True when *path* is lexically ``projects/<slug>/<uuid>.jsonl`` under *root*."""
+
+    absolute = os.path.abspath(path)
+    abs_root = os.path.abspath(root)
+    if not _lexical_under_root(absolute, abs_root):
+        return False
+    try:
+        relative = os.path.relpath(absolute, abs_root)
+    except ValueError:
+        return False
+    parts = [part for part in Path(relative).parts if part not in ("", ".")]
+    if len(parts) != 3 or parts[0] != "projects" or not parts[1]:
+        return False
+    basename = parts[2]
+    if not basename.endswith(".jsonl"):
+        return False
+    try:
+        uuid.UUID(basename[:-6])
+    except ValueError:
+        return False
+    return True
+
+
+def _missing_under_safe_parents(path: str, root: str) -> bool:
+    """True when a missing *path* is a valid under-root session shape with safe parents.
+
+    Used to map ``E_UNSAFE_PATH`` from a missing leaf to ``E_NO_MATCH`` only when:
+
+    - the path is lexically ``projects/<slug>/<uuid>.jsonl`` under *root*
+    - the leaf does not exist
+    - every existing parent under the root is a real (non-symlink) directory
+
+    Symlinked parents, invalid layout, and non-ENOENT parent errors stay unsafe.
+    """
+
+    absolute = os.path.abspath(path)
+    abs_root = os.path.abspath(root)
+    if not _lexical_session_shape(absolute, abs_root):
+        return False
+    if os.path.lexists(absolute):
+        return False
+    try:
+        relative = os.path.relpath(absolute, abs_root)
+    except ValueError:
+        return False
+    current = abs_root
+    parts = [part for part in Path(relative).parts if part not in ("", ".")]
+    for part in parts[:-1]:
+        if part == os.pardir:
+            return False
+        current = os.path.join(current, part)
+        try:
+            mode = os.lstat(current).st_mode
+        except FileNotFoundError:
+            # Intermediate component missing — under-root session shape no-match.
+            return True
+        except OSError:
+            # EACCES / other errors must not be reclassified as ordinary no-match.
+            return False
+        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+            return False
+    return True
+
+
+def _exact_path_candidate(root: str, query: Query) -> str | None:
+    """Resolve an absolute path ref without store-wide discovery when possible.
+
+    Returns ``None`` when *query.ref* is not an absolute path. Raises
+    ``E_NO_MATCH`` for a missing path that is still under the approved root
+    with safe real parents, and ``E_UNSAFE_PATH`` for outside/symlink/layout
+    failures (including a missing leaf under a symlinked parent).
+    """
+
+    ref = query.ref.strip() if query.ref else None
+    if not ref or not os.path.isabs(ref):
+        return None
+    try:
+        path, _ = require_regular_no_symlinks(ref, root)
+    except DiagnosticError as error:
+        if error.code == "E_UNSAFE_PATH":
+            absolute = os.path.abspath(ref)
+            # Missing under-root target with safe parents → no match.
+            # Outside / symlink parents stay unsafe even when the leaf is absent.
+            if _missing_under_safe_parents(absolute, root):
+                raise DiagnosticError("E_NO_MATCH", source="claude", provider=FORMAT_ID) from error
+        raise
+    if not _session_layout_ok(path, root):
+        raise DiagnosticError.unsafe_path()
+    return path
+
+
+def _paths_under_projects(
+    project_dirs: list[str],
+    *,
+    exact_uuid: str | None = None,
+) -> list[str]:
+    """Collect session JSONL paths under the given project directories.
+
+    Exact UUID lookups probe only ``<uuid>.jsonl`` per project (no session-dir
+    scandir). Non-exact list still bounds directory membership.
+    """
+
+    values: list[str] = []
+    if exact_uuid is not None:
+        for project in project_dirs:
+            candidate = os.path.join(project, f"{exact_uuid}.jsonl")
+            if _regular_session_file(candidate):
+                values.append(candidate)
+                if len(values) > DEFAULT_BOUNDS.scanned_records:
+                    raise DiagnosticError.limit_exceeded()
+        return values
+
     for project in project_dirs:
         names = _bounded_names(project, limit=DEFAULT_BOUNDS.scanned_records)
         for name in names:
@@ -295,21 +470,88 @@ def _session_paths(
                 uuid.UUID(stem)
             except ValueError:
                 continue
-            if exact_uuid is not None and stem != exact_uuid:
-                continue
             candidate = os.path.join(project, name)
-            try:
-                current = os.lstat(candidate)
-            except OSError:
-                continue
-            if stat.S_ISREG(current.st_mode) and not stat.S_ISLNK(current.st_mode):
+            if _regular_session_file(candidate):
                 values.append(candidate)
                 if len(values) > DEFAULT_BOUNDS.scanned_records:
                     raise DiagnosticError.limit_exceeded()
-    if cwd_scoped and prefer_slugs and exact_uuid is not None and not values:
-        # UUID not under the cwd slug — scan remaining projects (Grok _find_claude_id).
-        return _session_paths(root, prefer_slugs=prefer_slugs, exact_uuid=exact_uuid, cwd_scoped=False)
     return values
+
+
+def _session_paths(
+    root: str,
+    *,
+    prefer_slugs: tuple[str, ...] = (),
+    exact_uuid: str | None = None,
+    cwd_scoped: bool = False,
+) -> list[str]:
+    """Enumerate session JSONL paths.
+
+    Fast paths (issue #19):
+
+    - exact UUID + preferred cwd slug(s): construct
+      ``projects/<slug>/<uuid>.jsonl`` and return it when present without
+      enumerating unrelated project directories
+    - cwd-scoped discovery uses preferred dirs only (no full projects scandir)
+      when those dirs exist
+
+    Exact UUID still falls back to a broader, basename-probed scan when the
+    direct candidate is absent. Recorded-cwd validation remains in
+    ``_summary`` / ``show`` — slug presence alone is never authority.
+    """
+    if exact_uuid is not None and prefer_slugs:
+        # Prefer direct slug path(s) first, then remaining project buckets via
+        # basename probe. Callers that can validate recorded cwd (list/show)
+        # should use `_exact_uuid_paths` so a cwd-mismatched direct file does
+        # not block an eligible relocated copy (Codex P2 on #19).
+        return _exact_uuid_paths(root, exact_uuid, prefer_slugs=prefer_slugs)
+
+    if cwd_scoped and prefer_slugs:
+        paths, _fallback = _cwd_scoped_session_paths(root, prefer_slugs)
+        return paths
+
+    project_dirs = _project_dirs(root, prefer_slugs=prefer_slugs, prefer_only=False)
+    return _paths_under_projects(project_dirs, exact_uuid=exact_uuid)
+
+
+def _cwd_scoped_session_paths(
+    root: str,
+    prefer_slugs: tuple[str, ...],
+) -> tuple[list[str], bool]:
+    preferred_dirs = _project_dirs(root, prefer_slugs=prefer_slugs, prefer_only=True)
+    if preferred_dirs:
+        return _paths_under_projects(preferred_dirs, exact_uuid=None), False
+    # Preferred slug dir missing: preserve legacy broad list so sessions whose
+    # project bucket name differs can still match recorded cwd.
+    project_dirs = _project_dirs(root, prefer_slugs=prefer_slugs, prefer_only=False)
+    return _paths_under_projects(project_dirs, exact_uuid=None), True
+
+
+def _exact_uuid_paths(
+    root: str,
+    exact_uuid: str,
+    *,
+    prefer_slugs: tuple[str, ...] = (),
+) -> list[str]:
+    """Ordered exact-UUID candidates: preferred slug files, then broad probe.
+
+    Preferred direct files come first so callers can accept them without a full
+    projects scandir when recorded-cwd validation succeeds. Broad basename
+    probing still runs so a cwd-mismatched file under the guessed slug cannot
+    hide an eligible copy in another project bucket.
+    """
+
+    direct = _direct_uuid_under_slugs(root, exact_uuid, prefer_slugs)
+    project_dirs = _project_dirs(root, prefer_slugs=prefer_slugs, prefer_only=False)
+    broad = _paths_under_projects(project_dirs, exact_uuid=exact_uuid)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for path in (*direct, *broad):
+        if path in seen:
+            continue
+        seen.add(path)
+        ordered.append(path)
+    return ordered
 
 
 def _prefer_slugs_for(query: Query) -> tuple[str, ...]:
@@ -384,6 +626,7 @@ def _scan_metadata_chunk(
     starts_mid_line: bool,
     ends_at_eof: bool,
     stop_when_primary_ready: bool,
+    stop_when_cwd_ready: bool = False,
 ) -> None:
     lines = data.splitlines(keepends=True)
     start = 1 if starts_mid_line and lines else 0
@@ -405,6 +648,8 @@ def _scan_metadata_chunk(
                 break
             continue
         metadata.observe(value)
+        if stop_when_cwd_ready and metadata.cwds:
+            break
         if (
             stop_when_primary_ready
             and metadata.cwds
@@ -418,6 +663,8 @@ def _metadata_windows(
     path: str,
     root: str,
     budget: ReadBudget,
+    *,
+    cwd_only: bool = False,
 ) -> tuple[StableWindows, _TranscriptMetadata, tuple[str, ...]]:
     _validate_claude_bounds(budget)
     observation = stable_read_windows(
@@ -440,9 +687,10 @@ def _metadata_windows(
         warnings=warnings,
         starts_mid_line=False,
         ends_at_eof=full_in_head,
-        stop_when_primary_ready=not full_in_head,
+        stop_when_primary_ready=not full_in_head and not cwd_only,
+        stop_when_cwd_ready=cwd_only,
     )
-    if not full_in_head and observation.tail:
+    if not full_in_head and observation.tail and not (cwd_only and metadata.cwds):
         tail = observation.tail
         starts_mid_line = observation.tail_offset > 0
         if observation.tail_offset < len(observation.head):
@@ -457,10 +705,41 @@ def _metadata_windows(
             starts_mid_line=starts_mid_line,
             ends_at_eof=True,
             stop_when_primary_ready=False,
+            stop_when_cwd_ready=cwd_only,
         )
     if metadata.records_seen == 0:
         raise DiagnosticError("E_UNSUPPORTED_FORMAT", source="claude", provider=FORMAT_ID)
     return observation, metadata, tuple(dict.fromkeys(warnings))
+
+
+def _recorded_cwd_matches(
+    path: str,
+    root: str,
+    requested_cwd: str,
+    budget: ReadBudget,
+) -> bool:
+    _observation, metadata, _warnings = _metadata_windows(
+        path,
+        root,
+        budget,
+        cwd_only=True,
+    )
+    return metadata.selected_cwd(requested_cwd) is not None
+
+
+def _provisional_metadata_budget(budget: ReadBudget) -> ReadBudget:
+    return ReadBudget(
+        budget.limits,
+        records=budget.records,
+        transcript_records_read=budget.transcript_records_read,
+        bytes_read=budget.bytes_read,
+        turns=budget.turns,
+    )
+
+
+def _commit_metadata_budget(target: ReadBudget, admitted: ReadBudget) -> None:
+    target.consume_records(admitted.records - target.records)
+    target.consume_bytes(admitted.bytes_read - target.bytes_read)
 
 
 def _validate_claude_bounds(budget: ReadBudget) -> None:
@@ -752,7 +1031,107 @@ def _flatten_text(value: object) -> str | None:
     return None
 
 
-def _turn_records(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+@dataclass(frozen=True, slots=True)
+class _PendingToolCall:
+    name: str | None
+    rendered_input: str
+    timestamp: str | None
+    input_truncated: bool
+
+
+@dataclass(slots=True)
+class _ToolCallContext:
+    maximum_pending: int
+    maximum_chars: int
+    pending: dict[str, _PendingToolCall] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+
+    def observe_call(self, item: Mapping[str, Any], timestamp: str | None) -> None:
+        identifier = item.get("id")
+        if not isinstance(identifier, str) or not identifier:
+            return
+        if identifier not in self.pending and len(self.pending) >= self.maximum_pending:
+            return
+        serialized = json.dumps(
+            item.get("input"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        cleaned = sanitize_text(serialized, max_chars=self._input_allowance())
+        self.warnings.extend(cleaned.warnings)
+        name = item.get("name")
+        self.pending[identifier] = _PendingToolCall(
+            name=name if isinstance(name, str) else None,
+            rendered_input=cleaned.text,
+            timestamp=timestamp,
+            input_truncated=cleaned.truncated,
+        )
+
+    def correlated_result(
+        self,
+        item: Mapping[str, Any],
+        result: str,
+        timestamp: str | None,
+    ) -> dict[str, Any]:
+        identifier = item.get("tool_use_id")
+        call = self.pending.pop(identifier, None) if isinstance(identifier, str) else None
+        if call is None:
+            return {"role": "tool", "content": result, "timestamp": timestamp}
+        content, result_truncated = self._combined_content(call.rendered_input, result)
+        return {
+            "role": "tool",
+            "content": content,
+            "tool_name": call.name,
+            "timestamp": timestamp,
+            "_pretruncated": call.input_truncated or result_truncated,
+        }
+
+    def missing_results(self) -> list[dict[str, Any]]:
+        values: list[dict[str, Any]] = []
+        for call in self.pending.values():
+            content, result_truncated = self._combined_content(
+                call.rendered_input,
+                "[missing tool result]",
+            )
+            values.append(
+                {
+                    "role": "tool",
+                    "content": content,
+                    "tool_name": call.name,
+                    "timestamp": call.timestamp,
+                    "_pretruncated": call.input_truncated or result_truncated,
+                }
+            )
+        self.pending.clear()
+        return values
+
+    def _input_allowance(self) -> int:
+        framing = len("Input: \nResult:\n")
+        result_reserve = self.maximum_chars // 2
+        return max(
+            0,
+            min(
+                self.maximum_chars // 4,
+                self.maximum_chars - framing - result_reserve,
+            ),
+        )
+
+    def _combined_content(self, rendered_input: str, result: str) -> tuple[str, bool]:
+        prefix = f"Input: {rendered_input}\nResult:\n"
+        if len(prefix) >= self.maximum_chars:
+            cleaned = sanitize_text(result, max_chars=self.maximum_chars)
+            self.warnings.extend(cleaned.warnings)
+            return cleaned.text, cleaned.truncated
+        cleaned = sanitize_text(result, max_chars=self.maximum_chars - len(prefix))
+        self.warnings.extend(cleaned.warnings)
+        return prefix + cleaned.text, cleaned.truncated
+
+
+def _turn_records(
+    record: Mapping[str, Any],
+    tool_calls: _ToolCallContext,
+) -> list[dict[str, Any]]:
     record_type = record.get("type")
     if record_type not in {"user", "assistant"} or record.get("isMeta") is True:
         return []
@@ -773,21 +1152,17 @@ def _turn_records(record: Mapping[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(item, Mapping):
             continue
         kind = item.get("type")
-        if kind in {"thinking", "redacted_thinking", "signature", "tool_use"}:
+        if kind in {"thinking", "redacted_thinking", "signature"}:
+            continue
+        if kind == "tool_use":
+            tool_calls.observe_call(item, timestamp)
             continue
         if kind in {"text", "input_text", "output_text"} and isinstance(item.get("text"), str):
             values.append({"role": message_role, "content": item["text"], "timestamp": timestamp})
         elif kind == "tool_result":
             text = _flatten_text(item.get("content"))
             if text is not None:
-                values.append(
-                    {
-                        "role": "tool",
-                        "content": text,
-                        "tool_name": item.get("tool_name") if isinstance(item.get("tool_name"), str) else None,
-                        "timestamp": timestamp,
-                    }
-                )
+                values.append(tool_calls.correlated_result(item, text, timestamp))
     return values
 
 
@@ -937,7 +1312,67 @@ class ClaudeAdapter:
             root = _existing_root(query)
             if root is None:
                 return CapabilityReport(self.key, FORMAT_ID, "unavailable")
+
+            def _probe_path(path: str) -> CapabilityReport | None:
+                try:
+                    _observation, metadata, _warnings = _metadata_windows(
+                        path, root, ReadBudget()
+                    )
+                    _metadata_session_id(path, metadata)
+                    return CapabilityReport(
+                        self.key, FORMAT_ID, "supported", root=root, evidence=(FORMAT_ID,)
+                    )
+                except DiagnosticError as error:
+                    if error.code in {"E_UNSAFE_PATH", "E_SOURCE_BUSY"}:
+                        return CapabilityReport(self.key, FORMAT_ID, "unsafe", root=root)
+                    return None
+
+            # Exact absolute path / UUID must not depend on project-dir enumeration
+            # (issue #19: 2k+ siblings or project buckets would fail probe first).
+            try:
+                exact_path = _exact_path_candidate(root, query)
+            except DiagnosticError as error:
+                if error.code in {"E_UNSAFE_PATH", "E_SOURCE_BUSY"}:
+                    return CapabilityReport(self.key, FORMAT_ID, "unsafe", root=root)
+                if (
+                    error.code == "E_NO_MATCH"
+                    and query.ref
+                    and os.path.isabs(query.ref.strip())
+                ):
+                    # Missing approved session path: capability remains supported
+                    # so list/show can surface E_NO_MATCH without sibling scandir.
+                    projects = os.path.join(root, "projects")
+                    if _regular_directory(projects, root):
+                        return CapabilityReport(
+                            self.key, FORMAT_ID, "supported", root=root, evidence=(FORMAT_ID,)
+                        )
+                    return CapabilityReport(self.key, FORMAT_ID, "unavailable", root=root)
+                exact_path = None
+            if exact_path is not None:
+                report = _probe_path(exact_path)
+                if report is not None:
+                    return report
+
+            exact = _exact_uuid_ref(query.ref)
             prefer = _prefer_slugs_for(query)
+            if exact is not None:
+                # Exact UUID: basename probe only (never scandir session siblings).
+                if prefer:
+                    for path in _direct_uuid_under_slugs(root, exact, prefer):
+                        report = _probe_path(path)
+                        if report is not None:
+                            return report
+                for path in _exact_uuid_paths(root, exact, prefer_slugs=prefer):
+                    report = _probe_path(path)
+                    if report is not None:
+                        return report
+                projects = os.path.join(root, "projects")
+                if _regular_directory(projects, root):
+                    return CapabilityReport(
+                        self.key, FORMAT_ID, "supported", root=root, evidence=(FORMAT_ID,)
+                    )
+                return CapabilityReport(self.key, FORMAT_ID, "unavailable", root=root)
+
             paths = _session_paths(root, prefer_slugs=prefer, cwd_scoped=bool(prefer))
             if not paths:
                 # Empty cwd-scoped dir is still a supported store layout if projects exists.
@@ -946,16 +1381,9 @@ class ClaudeAdapter:
                     return CapabilityReport(self.key, FORMAT_ID, "supported", root=root, evidence=(FORMAT_ID,))
                 return CapabilityReport(self.key, FORMAT_ID, "unavailable", root=root)
             for path in paths:
-                try:
-                    _observation, metadata, _warnings = _metadata_windows(
-                        path, root, ReadBudget()
-                    )
-                    _metadata_session_id(path, metadata)
-                    return CapabilityReport(self.key, FORMAT_ID, "supported", root=root, evidence=(FORMAT_ID,))
-                except DiagnosticError as error:
-                    if error.code in {"E_UNSAFE_PATH", "E_SOURCE_BUSY"}:
-                        return CapabilityReport(self.key, FORMAT_ID, "unsafe", root=root)
-                    continue
+                report = _probe_path(path)
+                if report is not None:
+                    return report
             return CapabilityReport(self.key, FORMAT_ID, "supported", root=root, evidence=(FORMAT_ID,))
         except DiagnosticError as error:
             state = "unsafe" if error.code in {"E_UNSAFE_PATH", "E_SOURCE_BUSY"} else "unsupported"
@@ -966,14 +1394,55 @@ class ClaudeAdapter:
         if root is None:
             raise DiagnosticError("E_CAPABILITY_UNAVAILABLE", source=self.key, provider=FORMAT_ID)
         values: list[SessionSummary] = []
-        exact = _exact_uuid_ref(query.ref)
-        prefer = _prefer_slugs_for(query)
-        for path in _session_paths(
-            root,
-            prefer_slugs=prefer,
-            exact_uuid=exact,
-            cwd_scoped=bool(prefer) and exact is None,
-        ):
+        cwd_fallback = False
+        # Absolute approved path: validate/read that file only (#19).
+        exact_path = _exact_path_candidate(root, query)
+        if exact_path is not None:
+            paths: list[str] = [exact_path]
+        else:
+            exact = _exact_uuid_ref(query.ref)
+            prefer = _prefer_slugs_for(query)
+            if exact is not None and prefer:
+                # Fast path: try preferred slug file(s) first without broad
+                # projects scandir. Only enumerate other buckets when none of
+                # the direct candidates survive recorded-cwd validation.
+                direct = _direct_uuid_under_slugs(root, exact, prefer)
+                for path in direct:
+                    item = _summary(path, root, query, budget)
+                    if item is not None:
+                        values.append(item)
+                if values:
+                    values.sort(
+                        key=lambda item: (
+                            item.updated_at is None,
+                            item.updated_at or "",
+                            item.session_id,
+                        ),
+                        reverse=True,
+                    )
+                    return values
+                # Direct file missing or cwd-mismatched — broad basename probe.
+                paths = _exact_uuid_paths(root, exact, prefer_slugs=prefer)
+                # Already tried direct paths above; skip re-summarizing them.
+                tried = set(direct)
+                paths = [path for path in paths if path not in tried]
+            else:
+                # Non-exact list still cwd-scopes when a preferred slug exists.
+                if prefer:
+                    paths, cwd_fallback = _cwd_scoped_session_paths(root, prefer)
+                else:
+                    paths = _session_paths(root, exact_uuid=exact)
+        for path in paths:
+            if cwd_fallback and query.cwd is not None:
+                prefilter_budget = _provisional_metadata_budget(budget)
+                if not _recorded_cwd_matches(
+                    path,
+                    root,
+                    query.cwd,
+                    prefilter_budget,
+                ):
+                    _commit_metadata_budget(budget, prefilter_budget)
+                    continue
             # List still needs recorded cwd/title for collision safety; show does lineage.
             item = _summary(path, root, query, budget)
             if item is not None:
@@ -988,15 +1457,54 @@ class ClaudeAdapter:
         path = ref.source_path
         if path is None:
             prefer = _prefer_slugs_for(query)
-            matches = _session_paths(
-                root,
-                prefer_slugs=prefer,
-                exact_uuid=ref.session_id,
-                cwd_scoped=bool(prefer),
-            )
-            if len(matches) != 1:
-                raise DiagnosticError("E_NO_MATCH", source=self.key, provider=FORMAT_ID)
-            path = matches[0]
+            # Prefer direct slug file(s), then broad basename probe only if needed
+            # (cwd-mismatched direct must not hide a relocated eligible copy).
+            if prefer:
+                ordered = _direct_uuid_under_slugs(root, ref.session_id, prefer)
+            else:
+                ordered = []
+            if not ordered:
+                ordered = _session_paths(
+                    root,
+                    prefer_slugs=prefer,
+                    exact_uuid=ref.session_id,
+                    cwd_scoped=False,
+                )
+            else:
+                # Validate direct candidates; fall back to broad only on cwd miss
+                # (summary is None). Limit/busy/corrupt diagnostics must propagate
+                # (Codex P2 on #19) — do not swallow as soft no-match.
+                chosen: str | None = None
+                for candidate in ordered:
+                    summary = _summary(candidate, root, query, budget)
+                    if summary is not None and summary.session_id == ref.session_id:
+                        chosen = candidate
+                        break
+                if chosen is not None:
+                    path = chosen
+                    ordered = []
+                else:
+                    tried = set(ordered)
+                    ordered = [
+                        item
+                        for item in _exact_uuid_paths(
+                            root, ref.session_id, prefer_slugs=prefer
+                        )
+                        if item not in tried
+                    ]
+            if path is None:
+                if not ordered:
+                    raise DiagnosticError("E_NO_MATCH", source=self.key, provider=FORMAT_ID)
+                if len(ordered) == 1:
+                    path = ordered[0]
+                else:
+                    for candidate in ordered:
+                        summary = _summary(candidate, root, query, budget)
+                        if summary is not None and summary.session_id == ref.session_id:
+                            path = candidate
+                            break
+                    if path is None:
+                        raise DiagnosticError("E_NO_MATCH", source=self.key, provider=FORMAT_ID)
         _validate_claude_bounds(budget)
         with snapshot_regular_file(
             path,
@@ -1022,17 +1530,33 @@ class ClaudeAdapter:
             turns: list[Turn] = []
             all_warnings = list((*index.warnings, *lineage_warnings))
             turn_bounds = replace(DEFAULT_BOUNDS, tool_output_chars=query.max_tool_chars)
+            tool_calls = _ToolCallContext(
+                maximum_pending=min(
+                    budget.limits.scanned_records,
+                    DEFAULT_BOUNDS.scanned_records,
+                ),
+                maximum_chars=query.max_tool_chars,
+            )
+
+            def append_turn(raw: Mapping[str, Any]) -> None:
+                turn, turn_warnings = sanitize_turn_record(
+                    raw,
+                    ordinal=len(turns),
+                    bounds=turn_bounds,
+                )
+                all_warnings.extend(turn_warnings)
+                if turn is not None:
+                    if raw.get("_pretruncated") is True and not turn.truncated:
+                        turn = replace(turn, truncated=True)
+                    budget.consume_turns()
+                    turns.append(turn)
+
             for record in records:
-                for raw in _turn_records(record):
-                    turn, turn_warnings = sanitize_turn_record(
-                        raw,
-                        ordinal=len(turns),
-                        bounds=turn_bounds,
-                    )
-                    all_warnings.extend(turn_warnings)
-                    if turn is not None:
-                        budget.consume_turns()
-                        turns.append(turn)
+                for raw in _turn_records(record, tool_calls):
+                    append_turn(raw)
+            for raw in tool_calls.missing_results():
+                append_turn(raw)
+            all_warnings.extend(tool_calls.warnings)
             last_user = next(
                 (turn.content for turn in reversed(turns) if turn.role == "user"),
                 None,

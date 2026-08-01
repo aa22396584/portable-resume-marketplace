@@ -1,6 +1,6 @@
 # Portable Resume Marketplace
 
-Public, host-native catalogs for [Portable Resume](https://github.com/ImL1s/resume-skills) **0.3.4**.
+Public, host-native catalogs for [Portable Resume](https://github.com/ImL1s/resume-skills) **0.4.0**.
 The packaged readers run locally, use only Python's standard library, and emit inert, untrusted handoff text for a fresh session. They do not restore a live process or contact the network.
 
 Documentation:
@@ -66,10 +66,10 @@ Inside Kimi Code CLI:
 Or install the signed release artifact directly:
 
 ```text
-/plugins install https://github.com/ImL1s/resume-skills/releases/download/v0.3.4/portable-resume-0.3.4-kimi-plugin.zip
+/plugins install https://github.com/ImL1s/resume-skills/releases/download/v0.4.0/portable-resume-0.4.0-kimi-plugin.zip
 ```
 
-Antigravity and OpenCode do not currently provide a compatible public marketplace catalog. Use the host-specific archives from the [Portable Resume v0.3.4 release](https://github.com/ImL1s/resume-skills/releases/tag/v0.3.4).
+Antigravity and OpenCode do not currently provide a compatible public marketplace catalog. Use the host-specific archives from the [Portable Resume v0.4.0 release](https://github.com/ImL1s/resume-skills/releases/tag/v0.4.0).
 
 ## Integrity and updates
 

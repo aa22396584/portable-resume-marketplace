@@ -18,9 +18,9 @@ from .base import CapabilityReport, ResolvedRef
 from ..bounds import DEFAULT_BOUNDS, ReadBudget
 from ..diagnostics import DiagnosticError
 from ..model import Query, Session, SessionSummary, Turn
-from ..paths import canonical_root, canonicalize_cwd, is_within, same_cwd
+from ..paths import canonical_root, canonicalize_cwd, is_within, require_regular_no_symlinks, same_cwd
 from ..sanitize import sanitize_turn_record
-from ..snapshot import stable_read_bytes
+from ..snapshot import stable_read_bytes, stable_scan_lines
 
 FORMAT_ID = "antigravity-transcript-jsonl-v1"
 INDEX_FORMAT = "antigravity-index-v1"
@@ -182,7 +182,13 @@ class AntigravityAdapter:
                 return None, True
             return entries, False
         except DiagnosticError as error:
-            if error.code in {"E_UNSUPPORTED_FORMAT", "E_CORRUPT_RECORD", "E_SOURCE_BUSY"}:
+            # Oversized/corrupt optional index must not block exact-path recovery (#15).
+            if error.code in {
+                "E_UNSUPPORTED_FORMAT",
+                "E_CORRUPT_RECORD",
+                "E_SOURCE_BUSY",
+                "E_LIMIT_EXCEEDED",
+            }:
                 return None, True
             raise
 
@@ -242,13 +248,17 @@ class AntigravityAdapter:
             return None
         if os.path.isabs(ref):
             path = ref
-            if os.path.isdir(path):
+            if os.path.isdir(path) and not os.path.islink(path):
                 path = os.path.join(path, ".system_generated", "logs", "transcript.jsonl")
             if os.path.basename(path) != "transcript.jsonl":
                 return None
-            if not is_within(path, root) or os.path.islink(path):
-                raise DiagnosticError.unsafe_path()
-            return path if os.path.isfile(path) else None
+            try:
+                safe, _ = require_regular_no_symlinks(path, root)
+            except DiagnosticError as error:
+                if error.code == "E_UNSAFE_PATH":
+                    raise
+                return None
+            return safe
         if _ID.fullmatch(ref) is None or ref in {"latest", ".", ".."}:
             return None
         path = self._conversation_path(brain, ref)
@@ -380,21 +390,37 @@ class AntigravityAdapter:
             raise DiagnosticError("E_UNSUPPORTED_FORMAT", source=self.key, provider=ref.provider)
         if ref.source_path is None or not is_within(ref.source_path, root):
             raise DiagnosticError.unsafe_path()
+        # Exact safe transcript path is authoritative (#15). Optional index is
+        # best-effort hint enrichment only — never required for show.
         brain = self._brain(root)
-        entries, stale = self._read_index(brain, root)
         hint: Mapping[str, Any] | None = None
-        if entries is not None:
-            for entry in entries:
-                if entry.get("id") != ref.session_id:
-                    continue
-                if hint is not None:
-                    stale = True
-                    continue
-                expected = self._conversation_path(brain, ref.session_id)
-                if canonicalize_cwd(expected) == canonicalize_cwd(ref.source_path):
-                    hint = entry
-                else:
-                    stale = True
+        stale = False
+        try:
+            entries, index_stale = self._read_index(brain, root)
+            stale = index_stale
+            if entries is not None:
+                for entry in entries:
+                    if entry.get("id") != ref.session_id:
+                        continue
+                    if hint is not None:
+                        stale = True
+                        continue
+                    expected = self._conversation_path(brain, ref.session_id)
+                    if canonicalize_cwd(expected) == canonicalize_cwd(ref.source_path):
+                        hint = entry
+                    else:
+                        stale = True
+        except DiagnosticError as error:
+            if error.code in {
+                "E_UNSUPPORTED_FORMAT",
+                "E_CORRUPT_RECORD",
+                "E_SOURCE_BUSY",
+                "E_LIMIT_EXCEEDED",
+                "E_UNSAFE_PATH",
+            }:
+                stale = True
+            else:
+                raise
         summary, turns, warnings = self._read_transcript(
             ref.source_path,
             root,
@@ -419,28 +445,9 @@ class AntigravityAdapter:
         include_turns: bool,
         hint: Mapping[str, Any] | None,
     ) -> tuple[SessionSummary, list[Turn], list[str]]:
-        read = stable_read_bytes(path, root=root, budget=budget, hook=self._read_hook)
-        lines = read.data.split(b"\n")
-        trailing_fragment = bool(lines and lines[-1])
+        # Stream-reduce via stable_scan_lines; do not retain every outer record (#15).
+        # List path (include_turns=False) stops after session header and uses mtime.
         warnings: list[str] = []
-        records: list[Mapping[str, Any]] = []
-        nonempty = [(index, line.strip()) for index, line in enumerate(lines) if line.strip()]
-        for position, (line_index, raw) in enumerate(nonempty):
-            try:
-                value = _loads(raw)
-            except DiagnosticError:
-                is_final = position == len(nonempty) - 1 and trailing_fragment and line_index == len(lines) - 1
-                if is_final:
-                    warnings.append("W_PARTIAL_TAIL")
-                    continue
-                raise
-            if not isinstance(value, Mapping):
-                raise DiagnosticError("E_CORRUPT_RECORD", source=self.key, provider=FORMAT_ID)
-            records.append(value)
-            budget.consume_records()
-        if not records:
-            raise DiagnosticError("E_UNSUPPORTED_FORMAT", source=self.key, provider=FORMAT_ID)
-
         # transcript.jsonl -> logs -> .system_generated -> <conversation-id>
         path_id = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(path))))
         path_id = _session_id(path_id)
@@ -449,7 +456,33 @@ class AntigravityAdapter:
         created_values: list[str] = []
         updated_values: list[str] = []
         live_stream = False
-        for record in records:
+        saw_record = False
+        for line in stable_scan_lines(
+            path,
+            root=root,
+            budget=budget,
+            charge_transcript=True,
+            hook=self._read_hook,
+        ):
+            if not line.utf8_valid:
+                if not line.terminated:
+                    warnings.append("W_PARTIAL_TAIL")
+                    break
+                raise DiagnosticError("E_CORRUPT_RECORD", source=self.key, provider=FORMAT_ID)
+            raw = line.text.strip()
+            if not raw:
+                continue
+            try:
+                value = _loads(raw.encode("utf-8"))
+            except DiagnosticError:
+                if not line.terminated:
+                    warnings.append("W_PARTIAL_TAIL")
+                    continue
+                raise
+            if not isinstance(value, Mapping):
+                raise DiagnosticError("E_CORRUPT_RECORD", source=self.key, provider=FORMAT_ID)
+            saw_record = True
+            record = value
             kind = record.get("type")
             if not isinstance(kind, str):
                 raise DiagnosticError("E_UNSUPPORTED_FORMAT", source=self.key, provider=FORMAT_ID)
@@ -465,6 +498,9 @@ class AntigravityAdapter:
                 if _session_id(record.get("conversation_id")) != path_id:
                     raise DiagnosticError("E_CORRUPT_RECORD", source=self.key, provider=FORMAT_ID)
                 header = record
+                if not include_turns:
+                    # List metadata: header + file mtime is enough (#15).
+                    break
                 continue
             # Live AGY step stream (uppercase USER_INPUT / PLANNER_RESPONSE / tools).
             if kind == "user_input":
@@ -587,11 +623,29 @@ class AntigravityAdapter:
                 raise DiagnosticError("E_UNSUPPORTED_FORMAT", source=self.key, provider=FORMAT_ID)
             warnings.append("W_BROKEN_CHAIN")
 
+        if not saw_record:
+            raise DiagnosticError("E_UNSUPPORTED_FORMAT", source=self.key, provider=FORMAT_ID)
+
         header_id = path_id
         cwd: str | None = None
         title: str | None = None
         created_at: str | None = min(created_values) if created_values else None
         updated_at: str | None = max(updated_values) if updated_values else None
+        # List metadata stops at the session header: never treat header created_at
+        # as freshness. Prefer transcript mtime so age filters / latest stay honest (#15).
+        if not include_turns or updated_at is None:
+            try:
+                mtime = os.lstat(path).st_mtime
+                stamp = datetime.fromtimestamp(mtime, timezone.utc).isoformat(
+                    timespec="microseconds"
+                ).replace("+00:00", "Z")
+            except OSError:
+                stamp = None
+            if stamp is not None:
+                if not include_turns or updated_at is None:
+                    updated_at = stamp
+                if created_at is None:
+                    created_at = stamp
         if header is not None:
             raw_cwd = header.get("cwd")
             if isinstance(raw_cwd, str):
@@ -600,7 +654,9 @@ class AntigravityAdapter:
                 raise DiagnosticError("E_CORRUPT_RECORD", source=self.key, provider=FORMAT_ID)
             title = header.get("title") if isinstance(header.get("title"), str) else None
             created_at = _rfc3339(header.get("created_at")) or created_at
-            updated_at = _rfc3339(header.get("updated_at")) or updated_at
+            # List mode: transcript mtime stays authoritative for freshness (#15).
+            if include_turns:
+                updated_at = _rfc3339(header.get("updated_at")) or updated_at
         elif live_stream:
             # Live streams lack a session header; path id is authoritative.
             header = {"conversation_id": path_id}
@@ -620,7 +676,8 @@ class AntigravityAdapter:
             if title is None and isinstance(hint.get("title"), str):
                 title = hint["title"]
             created_at = created_at or _rfc3339(hint.get("created_at"))
-            updated_at = updated_at or _rfc3339(hint.get("updated_at"))
+            if include_turns:
+                updated_at = updated_at or _rfc3339(hint.get("updated_at"))
         if cwd is None:
             warnings.append("W_STALE_INDEX")
         summary = SessionSummary(

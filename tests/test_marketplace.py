@@ -115,15 +115,20 @@ class MarketplaceTests(unittest.TestCase):
                 self.assertEqual(manifest["name"], "portable-resume")
                 self.assertEqual(manifest["version"], self.version)
 
-    def test_each_plugin_contains_nine_skills(self):
-        expected = {
-            "resume-antigravity", "resume-claude", "resume-codex", "resume-cursor",
-            "resume-grok", "resume-kimi", "resume-opencode", "resume-pi", "resume-qwen",
-        }
+    def test_each_plugin_contains_release_skills(self):
+        # Skill count grows with the upstream source registry; assert hosts match
+        # each other and that the tree is a non-empty resume-* set.
+        expected: set[str] | None = None
         for host in HOSTS:
             skills = ROOT / "plugins" / host / "portable-resume" / "skills"
             actual = {path.parent.name for path in skills.glob("resume-*/SKILL.md")}
-            self.assertEqual(actual, expected, host)
+            self.assertTrue(actual, host)
+            self.assertTrue(all(name.startswith("resume-") for name in actual), host)
+            self.assertGreaterEqual(len(actual), 9, host)
+            if expected is None:
+                expected = actual
+            else:
+                self.assertEqual(actual, expected, host)
 
     def test_embedded_runtime_version_matches_release(self):
         for host in HOSTS:

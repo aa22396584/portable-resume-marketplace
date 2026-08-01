@@ -29,10 +29,12 @@ _rollout_id = _codex._rollout_id
 def _table_signature(connection: sqlite3.Connection) -> tuple[bool, str | None]:
     """Accept pinned column *supersets* (live Codex adds optional columns).
 
-    Required: id, rollout_path, source, cwd, archived, plus one of updated_at_ms
-    / updated_at. Optional title/first_user_message/git_branch may be absent
-    (SQL SELECT still names them — missing optional columns fail later; require
-    the optional trio when present or use COALESCE-compatible fixed SELECT).
+    Presence is required for id, rollout_path, source, cwd, and archived, but
+    their declared type affinity is not checked because SQLite affinity is loose
+    in live stores. One of updated_at_ms / updated_at must have integer affinity.
+    Optional title/first_user_message/git_branch may be absent (SQL SELECT still
+    names them — missing optional columns fail later; require the optional trio
+    when present or use COALESCE-compatible fixed SELECT).
     """
     try:
         rows = connection.execute("PRAGMA table_info(threads)").fetchall()
@@ -53,13 +55,6 @@ def _table_signature(connection: sqlite3.Connection) -> tuple[bool, str | None]:
         updated = "updated_at"
     else:
         return False, None
-    for name in ("id", "rollout_path", "source", "cwd"):
-        if columns.get(name) not in {"TEXT", "VARCHAR", "CHAR", "NVARCHAR", "CLOB"}:
-            # SQLite type affinity is loose; allow empty declared types.
-            if columns.get(name) not in {"", "ANY"}:
-                # Still accept common live TEXT-ish declarations only when present.
-                if not str(columns.get(name, "")).startswith("TEXT"):
-                    pass  # do not hard-fail on affinity; Grok only checks presence
     return True, updated
 
 
@@ -120,7 +115,16 @@ def _database_connection(path: str, root: str) -> Iterator[sqlite3.Connection]:
         yield connection
 
 
-def _database_summaries(path: str, root: str, query: Query, budget: ReadBudget) -> tuple[bool, list[SessionSummary]]:
+def _database_summaries(
+    path: str, root: str, query: Query, budget: ReadBudget
+) -> tuple[bool, list[SessionSummary], int]:
+    """Return ``(schema_supported, summaries, unresolved_path_count)``.
+
+    ``unresolved_path_count`` counts eligible SQL rows whose rollout path could
+    not be resolved (missing, symlink, UUID mismatch, or zstd without decoder).
+    Callers use it to decide read-only filesystem head fallback (#7).
+    """
+
     def _fetch_rows(connection: sqlite3.Connection) -> tuple[bool, str | None, list[tuple]]:
         supported, updated_column = _table_signature(connection)
         if not supported or updated_column is None:
@@ -167,9 +171,10 @@ def _database_summaries(path: str, root: str, query: Query, budget: ReadBudget) 
     with _database_connection(path, root) as connection:
         supported, _updated_column, rows = _fetch_rows(connection)
     if not supported:
-        return False, []
+        return False, [], 0
 
     values: list[SessionSummary] = []
+    unresolved = 0
     exact = _exact_uuid_ref(query.ref)
     for row in rows:
         budget.consume_records()
@@ -218,6 +223,7 @@ def _database_summaries(path: str, root: str, query: Query, budget: ReadBudget) 
             continue
         rollout = _resolve_rollout_path(root, rollout_raw, identifier)
         if rollout is None or (rollout.endswith(".zst") and _trusted_zstd() is None):
+            unresolved += 1
             continue
         values.append(
             SessionSummary(
@@ -235,4 +241,4 @@ def _database_summaries(path: str, root: str, query: Query, budget: ReadBudget) 
                 provider=SQLITE_FORMAT,
             )
         )
-    return True, values
+    return True, values, unresolved

@@ -30,7 +30,7 @@ def canonicalize_cwd(value: str | os.PathLike[str], *, base: str | os.PathLike[s
 
 
 def validate_canonical_absolute(value: str) -> str:
-    """Validate the stricter request-v1 cwd representation without rewriting it."""
+    """Validate request-v1's absolute/NFC grammar and return its canonical path."""
 
     if not isinstance(value, str):
         raise DiagnosticError.invalid()
@@ -38,10 +38,7 @@ def validate_canonical_absolute(value: str) -> str:
     normalized = normalize_unicode(value)
     if value != normalized or not os.path.isabs(value):
         raise DiagnosticError.invalid()
-    canonical = canonicalize_cwd(value)
-    if canonical != value:
-        raise DiagnosticError.invalid()
-    return value
+    return canonicalize_cwd(value)
 
 
 def canonical_root(root: str | os.PathLike[str]) -> str:
@@ -53,6 +50,24 @@ def canonical_root(root: str | os.PathLike[str]) -> str:
     if not stat.S_ISDIR(mode):
         raise DiagnosticError.unsafe_path()
     return path
+
+
+def canonical_source_root(root: str | os.PathLike[str]) -> str:
+    """Approve CLI ``--source-root`` as either a directory or a regular file.
+
+    Adapters that pin exact store files (``events.jsonl``, ``crush.db``,
+    ``state.db``, …) must receive the file path unchanged. Directory-only
+    ``canonical_root`` rejects those spellings with ``E_UNSAFE_PATH``.
+    """
+
+    path = canonicalize_cwd(root)
+    try:
+        mode = os.stat(path, follow_symlinks=False).st_mode
+    except OSError as error:
+        raise DiagnosticError.unsafe_path() from error
+    if stat.S_ISDIR(mode) or stat.S_ISREG(mode):
+        return path
+    raise DiagnosticError.unsafe_path()
 
 
 def is_within(path: str | os.PathLike[str], root: str | os.PathLike[str]) -> bool:
@@ -72,29 +87,80 @@ def require_within(path: str | os.PathLike[str], root: str | os.PathLike[str]) -
     return canonical
 
 
+def _lexical_under(path: str, root: str) -> str | None:
+    """Return the relative path if *path* is lexically beneath *root*, else None.
+
+    Uses abspath spellings only — never realpath — so an outside symlink that
+    happens to resolve inside *root* is still treated as outside.
+    """
+
+    try:
+        relative = os.path.relpath(path, root)
+    except ValueError:
+        return None
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep) or os.path.isabs(relative):
+        return None
+    return relative
+
+
+def _platform_root_aliases(raw_root: str, base: str) -> list[str]:
+    """Return accepted walk-root spellings for the configured root only.
+
+    Includes the lexical configured root and its pinned canonical form. On
+    macOS, also includes the reverse ``/var`` spelling when the canonical root
+    lives under ``/private/var`` and ``/var`` is the OS-owned alias for that
+    prefix. Arbitrary user-created aliases of the root are never added.
+    """
+
+    aliases: list[str] = []
+    for candidate in (raw_root, base):
+        if candidate not in aliases:
+            aliases.append(candidate)
+
+    private_prefix = "/private/var"
+    var_prefix = "/var"
+    if base == private_prefix or base.startswith(private_prefix + os.sep):
+        try:
+            if os.path.islink(var_prefix) and canonicalize_cwd(var_prefix) == private_prefix:
+                alt = var_prefix + base[len(private_prefix) :]
+                if alt not in aliases:
+                    aliases.append(alt)
+        except (OSError, DiagnosticError):
+            pass
+    return aliases
+
+
 def require_regular_no_symlinks(path: str | os.PathLike[str], root: str | os.PathLike[str]) -> tuple[str, str]:
-    """Reject symlinks in every component below an approved canonical root."""
+    """Reject symlinks in every user-controlled component below an approved root.
+
+    Accepted walk roots are only spellings of the *configured* root:
+
+    - the lexical ``abspath`` form of the configured root
+    - the pinned canonical form of that same root
+    - narrow OS-owned reverse aliases of that root (macOS ``/var`` ↔
+      ``/private/var``), derived from the root — never from the supplied path
+
+    The supplied path must be lexically under one of those roots. An unrelated
+    outside path is never rewritten via realpath merely because its target sits
+    inside the approved tree.
+    """
 
     base = canonical_root(root)
     raw_root = normalize_unicode(os.path.abspath(os.fspath(root)))
     original = normalize_unicode(os.path.abspath(os.fspath(path)))
     reject_controls(raw_root)
     reject_controls(original)
-    try:
-        relative = os.path.relpath(original, raw_root)
-    except ValueError as error:
-        raise DiagnosticError.unsafe_path() from error
-    if relative == os.pardir or relative.startswith(os.pardir + os.sep) or os.path.isabs(relative):
-        # The caller may use a canonical spelling while the configured root
-        # crosses an OS-owned alias such as macOS /var -> /private/var.
-        canonical = canonicalize_cwd(original)
-        if not is_within(canonical, base):
-            raise DiagnosticError.unsafe_path()
-        original = canonical
-        relative = os.path.relpath(original, base)
-        walk_root = base
-    else:
-        walk_root = raw_root
+
+    walk_root: str | None = None
+    relative: str | None = None
+    for candidate in _platform_root_aliases(raw_root, base):
+        candidate_relative = _lexical_under(original, candidate)
+        if candidate_relative is not None:
+            walk_root = candidate
+            relative = candidate_relative
+            break
+    if walk_root is None or relative is None:
+        raise DiagnosticError.unsafe_path()
 
     current = walk_root
     parts = [part for part in Path(relative).parts if part not in ("", ".")]
