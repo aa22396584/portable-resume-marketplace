@@ -12,7 +12,7 @@
       "description": "Offline, inert context migration across supported coding agents",
       "name": "portable-resume",
       "source": "./plugins/claude/portable-resume",
-      "version": "0.4.0"
+      "version": "0.4.1"
     }
   ]
 }

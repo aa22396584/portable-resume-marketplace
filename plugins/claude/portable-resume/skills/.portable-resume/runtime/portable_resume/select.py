@@ -52,12 +52,25 @@ def bounded_candidates(values: Iterable[SessionSummary]) -> tuple[Candidate, ...
     return tuple(candidates[: DEFAULT_BOUNDS.listed_sessions])
 
 
+def summary_matches(summary: SessionSummary, needle_casefold: str) -> bool:
+    """Casefolded substring match over list/show selection fields."""
+
+    fields = (
+        summary.session_id,
+        summary.title or "",
+        summary.cwd or "",
+        summary.branch or "",
+    )
+    return any(needle_casefold in field.casefold() for field in fields)
+
+
 def select_session(
     summaries: Iterable[SessionSummary],
     *,
     ref: str | None,
     cwd: str | None,
     approved_roots: Iterable[str] = (),
+    workspace_mode: str = "exact",
 ) -> SelectionResult:
     """Select one eligible summary or raise a stable no-match/ambiguous diagnostic."""
 
@@ -66,11 +79,17 @@ def select_session(
         raise DiagnosticError.limit_exceeded()
     # Sessions without a durable cwd stay eligible: the store cannot prove a
     # workspace mismatch (OpenHands event files have no cwd field).
-    eligible = [
-        value
-        for value in values
-        if cwd is None or value.cwd is None or same_cwd(value.cwd, cwd)
-    ]
+    if workspace_mode in {"worktree", "repository"} and cwd is not None:
+        from .workspace import filter_by_workspace, resolve_workspace
+
+        identity = resolve_workspace(cwd, mode=workspace_mode)
+        eligible = [row for row, _reason in filter_by_workspace(values, identity)]
+    else:
+        eligible = [
+            value
+            for value in values
+            if cwd is None or value.cwd is None or same_cwd(value.cwd, cwd)
+        ]
     normalized_ref = "latest" if ref is None or not ref.strip() else ref.strip()
 
     if normalized_ref == "latest":
@@ -140,8 +159,7 @@ def select_session(
     needle = normalized_ref.casefold()
     matches: list[SessionSummary] = []
     for value in eligible:
-        fields = (value.session_id, value.title or "", value.cwd or "", value.branch or "")
-        if any(needle in field.casefold() for field in fields):
+        if summary_matches(value, needle):
             matches.append(value)
     if not matches:
         raise DiagnosticError("E_NO_MATCH")
