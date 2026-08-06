@@ -1,25 +1,25 @@
 {
   "schema_version": 1,
   "source_repository": "https://github.com/ImL1s/resume-skills",
-  "source_release": "https://github.com/ImL1s/resume-skills/releases/tag/v0.4.1",
-  "tag": "v0.4.1",
-  "version": "0.4.1",
+  "source_release": "https://github.com/ImL1s/resume-skills/releases/tag/v0.4.2",
+  "tag": "v0.4.2",
+  "version": "0.4.2",
   "packages": {
     "claude": {
-      "asset": "portable-resume-0.4.1-claude-marketplace.zip",
-      "sha256": "ae445242f547a896b2e46ecbe88417707f47f14e973984fa9f87106790ab6aca"
+      "asset": "portable-resume-0.4.2-claude-marketplace.zip",
+      "sha256": "7cdcf1b2f3d40842718a09111a0e1e6a19c4d98c79cbb7cf9851e7a9fd86af2f"
     },
     "codex": {
-      "asset": "portable-resume-0.4.1-codex-marketplace.zip",
-      "sha256": "f576b2c96d17fa34284eb400e6741786f85b7a1ddeb07f9d10dca2f140ca1a77"
+      "asset": "portable-resume-0.4.2-codex-marketplace.zip",
+      "sha256": "94bfd8b413237fb725f52339a54f8598de6228a33f1f63ad108207e039ac50af"
     },
     "cursor": {
-      "asset": "portable-resume-0.4.1-cursor-marketplace.zip",
-      "sha256": "cff100b0c8e5e014a30824b3f6002a935308652553ac176da88ecedddc692310"
+      "asset": "portable-resume-0.4.2-cursor-marketplace.zip",
+      "sha256": "71de318554059d59aa6f1e08b1daa4c56cdb61003bb02b5035c74a87b40121f2"
     },
     "kimi": {
-      "asset": "portable-resume-0.4.1-kimi-plugin.zip",
-      "sha256": "f38e99e8b5cbb150891d3d54f61df3bfb3b685fcec117d863044b3c7278617de"
+      "asset": "portable-resume-0.4.2-kimi-plugin.zip",
+      "sha256": "fe3a8959e9873ce73d22d7872d15212c4f353af165837aa48bcf84fb79fc9a44"
     }
   }
 }
