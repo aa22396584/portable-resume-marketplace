@@ -44,6 +44,7 @@ class ScannedLine:
     byte_offset: int
     terminated: bool
     utf8_valid: bool = True
+    crlf: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -718,6 +719,402 @@ def stable_scan_lines(
     raise DiagnosticError.source_busy(attempts=attempts, family=family)
 
 
+def _spool_window_bytes(
+    descriptor: int,
+    spool: BinaryIO,
+    *,
+    maximum: int,
+) -> tuple[str, int]:
+    """Copy ``[current_pos, EOF)`` raw bytes into a spool, hashing as we go.
+
+    The tail scanner uses this instead of the per-line spool so a bounded
+    window cannot be amplified by per-record headers (#258 re-review P1).
+    """
+
+    digest = hashlib.sha256()
+    total = 0
+    while True:
+        block = os.read(descriptor, 64 * 1024)
+        if not block:
+            break
+        total += len(block)
+        if total > maximum:
+            raise DiagnosticError.limit_exceeded()
+        digest.update(block)
+        spool.write(block)
+    return digest.hexdigest(), total
+
+
+def _count_window_lines(
+    spool: BinaryIO,
+    *,
+    max_line_bytes: int,
+    discard_first: bool,
+) -> int:
+    """Count lines in a raw window spool without building ScannedLine objects.
+
+    Applies the incremental ``record_bytes`` limit and the optional
+    first-partial-line discard, but defers UTF-8 validation to the decode pass
+    (which only visits the admitted suffix). Used to locate the trim boundary
+    without materializing the whole window (codex re-review P1-3).
+    """
+
+    spool.seek(0)
+    buffer = bytearray()
+    first = True
+    total = 0
+    while True:
+        chunk = spool.read(64 * 1024)
+        if not chunk:
+            break
+        buffer.extend(chunk)
+        while True:
+            newline_index = buffer.find(b"\n")
+            if newline_index < 0:
+                # Unterminated line: fail early if it already exceeds the limit.
+                effective = len(buffer) - (1 if buffer[-1:] == b"\r" else 0)
+                if effective > max_line_bytes:
+                    raise DiagnosticError.limit_exceeded()
+                break
+            line_bytes = bytes(buffer[: newline_index + 1])
+            del buffer[: newline_index + 1]
+            payload = line_bytes[:-1]
+            if payload.endswith(b"\r"):
+                payload = payload[:-1]
+            if len(payload) > max_line_bytes:
+                raise DiagnosticError.limit_exceeded()
+            if first and discard_first:
+                first = False
+                continue
+            first = False
+            # Match stable_scan_lines: record_bytes limits decoded content, not
+            # the LF or optional CRLF terminator. This still validates skipped
+            # complete records before suffix admission.
+            total += 1
+    if buffer:
+        if not (first and discard_first):
+            total += 1
+    return total
+
+
+def _parse_window_lines(
+    spool: BinaryIO,
+    *,
+    max_line_bytes: int,
+    discard_first: bool,
+    skip: int = 0,
+) -> Iterator[ScannedLine]:
+    """Split a raw window spool into ScannedLine records (replay pass).
+
+    Applies ``record_bytes`` per line (``E_LIMIT_EXCEEDED``), UTF-8 validation
+    (``E_CORRUPT_RECORD``), CRLF detection (``crlf`` flag), and the optional
+    first-partial-line discard. Byte offsets are relative to the window start.
+
+    ``skip`` drops the first N complete lines without decoding them, locating
+    the admitted suffix without a second full decode pass (re-review P1-3).
+    """
+
+    spool.seek(0)
+    buffer = bytearray()
+    absolute_offset = 0
+    ordinal = 0
+    first = True
+    remaining_skip = skip
+    while True:
+        chunk = spool.read(64 * 1024)
+        if not chunk:
+            break
+        buffer.extend(chunk)
+        while True:
+            newline_index = buffer.find(b"\n")
+            if newline_index < 0:
+                # Unterminated line: fail early if it already exceeds the limit
+                # (a trailing CR does not count toward the content ceiling).
+                effective = len(buffer) - (1 if buffer[-1:] == b"\r" else 0)
+                if effective > max_line_bytes:
+                    raise DiagnosticError.limit_exceeded()
+                break
+            line_bytes = bytes(buffer[: newline_index + 1])
+            del buffer[: newline_index + 1]
+            payload = line_bytes[:-1]
+            crlf = payload.endswith(b"\r")
+            if crlf:
+                payload = payload[:-1]
+            if len(payload) > max_line_bytes:
+                raise DiagnosticError.limit_exceeded()
+            if first and discard_first:
+                first = False
+                absolute_offset += len(line_bytes)
+                continue
+            first = False
+            if remaining_skip > 0:
+                remaining_skip -= 1
+                absolute_offset += len(line_bytes)
+                continue
+            try:
+                text = payload.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise DiagnosticError("E_CORRUPT_RECORD") from error
+            yield ScannedLine(
+                ordinal=ordinal,
+                text=text,
+                byte_offset=absolute_offset,
+                terminated=True,
+                crlf=crlf,
+            )
+            ordinal += 1
+            absolute_offset += len(line_bytes)
+    if buffer:
+        if first and discard_first or remaining_skip > 0:
+            return
+        payload = bytes(buffer)
+        bare_cr = payload.endswith(b"\r")
+        if bare_cr:
+            payload = payload[:-1]
+        if len(payload) > max_line_bytes:
+            raise DiagnosticError.limit_exceeded()
+        utf8_valid = True
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError as error:
+            if error.reason != "unexpected end of data" or error.end != len(buffer):
+                raise DiagnosticError("E_CORRUPT_RECORD") from error
+            text = payload.decode("utf-8", errors="replace")
+            utf8_valid = False
+        yield ScannedLine(
+            ordinal=ordinal,
+            text=text,
+            byte_offset=absolute_offset,
+            # Bare trailing CR terminates (readline parity) but is not a CRLF
+            # pair: the mirror's reconstructed LF accounts for that CR.
+            terminated=bare_cr,
+            utf8_valid=utf8_valid,
+            crlf=False,
+        )
+
+
+def stable_scan_tail_lines(
+    path: str | os.PathLike[str],
+    *,
+    root: str | os.PathLike[str],
+    budget: ReadBudget | None = None,
+    max_line_bytes: int | None = None,
+    charge_transcript: bool = False,
+    stable_head_bytes: int = 0,
+    on_stable_head: Callable[[bytes, bool], None] | None = None,
+    hook: AttemptHook | None = None,
+) -> Iterator[ScannedLine]:
+    """Yield UTF-8 lines from a stable end-anchored window (#258).
+
+    Same no-follow / containment / attempt-verification rules as
+    ``stable_scan_lines``, but when the file exceeds the remaining
+    ``source_read_bytes`` budget the scanner admits only the final
+    ``remaining`` bytes (``tail_start = st_size - remaining``) instead of
+    hard-failing. The first line is discarded when the window begins
+    mid-record. After verification the admitted line count is trimmed to the
+    remaining ``transcript_records`` (or ``scanned_records`` when
+    ``charge_transcript`` is false), charging only the admitted records and
+    the unique window bytes. The whole file is never hashed or buffered.
+
+    ``stable_head_bytes`` optionally verifies a bounded head sample in the
+    same descriptor generation and supplies it to ``on_stable_head`` before
+    suffix trimming. Overlap with the tail is charged only once.
+    """
+
+    effective_budget = budget if budget is not None else ReadBudget()
+    budget_line_cap = min(
+        effective_budget.limits.record_bytes,
+        DEFAULT_BOUNDS.record_bytes,
+    )
+    if max_line_bytes is None:
+        line_limit = budget_line_cap
+    else:
+        if max_line_bytes < 0:
+            raise DiagnosticError.invalid()
+        line_limit = min(max_line_bytes, budget_line_cap)
+    if stable_head_bytes < 0 or stable_head_bytes > 4 * 1024 * 1024:
+        raise DiagnosticError.invalid()
+    max_file_bytes = min(
+        DEFAULT_BOUNDS.source_read_bytes,
+        effective_budget.limits.source_read_bytes,
+    )
+    safe, base = require_regular_no_symlinks(path, root)
+    parent = os.path.dirname(safe)
+    basename = os.path.basename(safe)
+    attempts = min(
+        effective_budget.limits.snapshot_attempts,
+        DEFAULT_BOUNDS.snapshot_attempts,
+    )
+    if attempts < 1:
+        raise DiagnosticError.invalid()
+    for attempt in range(1, attempts + 1):
+        before_entry = _target_entry_fingerprint(parent, basename, root=base)
+        descriptor = _open_no_follow(safe, base)
+        spool: tempfile.SpooledTemporaryFile | None = None
+        verified_spool: tempfile.SpooledTemporaryFile | None = None
+        pending_bytes = 0
+        tail_start = 0
+        starts_mid_line = False
+        stable_head: bytes | None = None
+        try:
+            before_stat = os.fstat(descriptor)
+            if not _entry_identity_matches(before_entry, before_stat):
+                continue
+            remaining = max(0, max_file_bytes - effective_budget.bytes_read)
+            head_size = min(before_stat.st_size, stable_head_bytes)
+            if before_stat.st_size <= remaining:
+                tail_start = 0
+            else:
+                tail_capacity = max(0, remaining - head_size)
+                tail_start = max(head_size, before_stat.st_size - tail_capacity)
+            starts_mid_line = False
+            boundary_probe: bytes | None = None
+            if tail_start > 0:
+                os.lseek(descriptor, tail_start - 1, os.SEEK_SET)
+                boundary_probe = os.read(descriptor, 1)
+                starts_mid_line = boundary_probe != b"\n"
+            if hook:
+                hook("before-read", attempt, safe)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            first_head = _read_exact_descriptor(
+                descriptor,
+                min(before_stat.st_size, stable_head_bytes),
+            )
+            os.lseek(descriptor, tail_start, os.SEEK_SET)
+            spool = tempfile.SpooledTemporaryFile(max_size=_SPOOL_RAM_CAP, mode="w+b")
+            try:
+                content_hash, pending_bytes = _spool_window_bytes(
+                    descriptor,
+                    spool,
+                    maximum=max_file_bytes,
+                )
+            except DiagnosticError as error:
+                # File grew past the admitted window mid-read: unstable, retry.
+                if (
+                    error.code == "E_LIMIT_EXCEEDED"
+                    and os.fstat(descriptor).st_size > before_stat.st_size
+                ):
+                    continue
+                raise
+            observed = _fingerprint(before_stat, content_hash)
+            if hook:
+                hook("after-read", attempt, safe)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            second_head = _read_exact_descriptor(descriptor, len(first_head))
+            if tail_start > 0:
+                os.lseek(descriptor, tail_start - 1, os.SEEK_SET)
+                probe_verify = os.read(descriptor, 1)
+            else:
+                probe_verify = None
+            try:
+                verified_hash, verified_size = _hash_descriptor_window(
+                    descriptor,
+                    start=tail_start,
+                    maximum=max_file_bytes,
+                )
+            except DiagnosticError as error:
+                # Verification-time growth: retry, not hard-fail.
+                if (
+                    error.code == "E_LIMIT_EXCEEDED"
+                    and os.fstat(descriptor).st_size > before_stat.st_size
+                ):
+                    continue
+                raise
+            verified = _fingerprint(os.fstat(descriptor), verified_hash)
+            if hook:
+                hook("after-verify-read", attempt, safe)
+            middle_entry = _target_entry_fingerprint(parent, basename, root=base)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            third_head = _read_exact_descriptor(descriptor, len(first_head))
+            if tail_start > 0:
+                os.lseek(descriptor, tail_start - 1, os.SEEK_SET)
+                probe_final = os.read(descriptor, 1)
+            else:
+                probe_final = None
+            try:
+                final_hash, final_size = _hash_descriptor_window(
+                    descriptor,
+                    start=tail_start,
+                    maximum=max_file_bytes,
+                )
+            except DiagnosticError as error:
+                # Verification-time growth: retry.
+                if (
+                    error.code == "E_LIMIT_EXCEEDED"
+                    and os.fstat(descriptor).st_size > before_stat.st_size
+                ):
+                    continue
+                raise
+            final_stat = os.fstat(descriptor)
+            final = _fingerprint(final_stat, final_hash)
+            after_entry = _target_entry_fingerprint(parent, basename, root=base)
+            if not (
+                observed == verified == final
+                and before_entry == middle_entry == after_entry
+                and _entry_identity_matches(before_entry, before_stat)
+                and _entry_identity_matches(after_entry, final_stat)
+                and pending_bytes == verified_size == final_size
+                == before_stat.st_size - tail_start
+                and boundary_probe == probe_verify == probe_final
+                and first_head == second_head == third_head
+            ):
+                continue
+            # Hand off spool for post-close replay so the source fd is never
+            # held open while yielding to callers.
+            verified_spool = spool
+            spool = None
+            stable_head = first_head
+        finally:
+            os.close(descriptor)
+            if spool is not None:
+                spool.close()
+        if verified_spool is not None:
+            try:
+                effective_budget.consume_bytes(
+                    pending_bytes + min(len(stable_head or b""), tail_start)
+                )
+                if on_stable_head is not None:
+                    on_stable_head(
+                        stable_head or b"",
+                        before_stat.st_size <= len(stable_head or b""),
+                    )
+                total = _count_window_lines(
+                    verified_spool,
+                    max_line_bytes=line_limit,
+                    discard_first=starts_mid_line,
+                )
+                if charge_transcript:
+                    record_max = min(
+                        effective_budget.limits.transcript_records,
+                        DEFAULT_BOUNDS.transcript_records,
+                    )
+                    remaining_records = record_max - effective_budget.transcript_records_read
+                else:
+                    record_max = min(
+                        effective_budget.limits.scanned_records,
+                        DEFAULT_BOUNDS.scanned_records,
+                    )
+                    remaining_records = record_max - effective_budget.records
+                skip = max(0, total - remaining_records)
+                admitted = total - skip
+                if charge_transcript:
+                    effective_budget.consume_transcript_records(admitted)
+                else:
+                    effective_budget.consume_records(admitted)
+                for line in _parse_window_lines(
+                    verified_spool,
+                    max_line_bytes=line_limit,
+                    discard_first=starts_mid_line,
+                    skip=skip,
+                ):
+                    yield line
+            finally:
+                verified_spool.close()
+            return
+    family = (os.path.basename(safe),)
+    raise DiagnosticError.source_busy(attempts=attempts, family=family)
+
+
 def stable_read_windows(
     path: str | os.PathLike[str],
     *,
@@ -1050,6 +1447,27 @@ def _hash_descriptor(descriptor: int, *, maximum: int) -> tuple[str, int]:
     return digest.hexdigest(), total
 
 
+def _hash_descriptor_window(descriptor: int, *, start: int, maximum: int) -> tuple[str, int]:
+    """SHA-256 of one bounded ``[start, EOF)`` window (no whole-file hash).
+
+    Used by the end-anchored tail scanner (#258) so verification never reads
+    bytes before ``start`` (a multi-GB file must not be hashed in full).
+    """
+
+    os.lseek(descriptor, start, os.SEEK_SET)
+    digest = hashlib.sha256()
+    total = 0
+    while True:
+        block = os.read(descriptor, 64 * 1024)
+        if not block:
+            break
+        total += len(block)
+        if total > maximum:
+            raise DiagnosticError.limit_exceeded()
+        digest.update(block)
+    return digest.hexdigest(), total
+
+
 def _family_paths(database: str) -> dict[str, str]:
     return {
         "main": database,
@@ -1116,21 +1534,23 @@ def _snapshot_sqlite_family_impl(
         raise DiagnosticError.invalid()
     safe, base = require_regular_no_symlinks(database, root)
     family_names = _family_names(safe)
+    last_busy_family = family_names
     for attempt in range(1, maximum_attempts + 1):
-        before = _family_state(safe, base, bounds=bounds)
-        state = dict(before[1])
-        if state["journal"] is not None:
-            raise DiagnosticError(
-                "E_SQLITE_HOT_JOURNAL",
-                provider=provider,
-                attempts=attempt,
-                family=(os.path.basename(safe + "-journal"),),
-            )
-        if hook:
-            hook("before-copy", attempt, safe)
-        temporary = tempfile.TemporaryDirectory(prefix="portable-resume-sqlite-")
-        os.chmod(temporary.name, 0o700)
+        temporary: tempfile.TemporaryDirectory[str] | None = None
         try:
+            before = _family_state(safe, base, bounds=bounds)
+            state = dict(before[1])
+            if state["journal"] is not None:
+                raise DiagnosticError(
+                    "E_SQLITE_HOT_JOURNAL",
+                    provider=provider,
+                    attempts=attempt,
+                    family=(os.path.basename(safe + "-journal"),),
+                )
+            if hook:
+                hook("before-copy", attempt, safe)
+            temporary = tempfile.TemporaryDirectory(prefix="portable-resume-sqlite-")
+            os.chmod(temporary.name, 0o700)
             total = 0
             for label in ("main", "wal"):
                 source = _family_paths(safe)[label]
@@ -1196,15 +1616,24 @@ def _snapshot_sqlite_family_impl(
                     _temporary=temporary,
                 )
         except DiagnosticError as error:
-            temporary.cleanup()
+            if temporary is not None:
+                temporary.cleanup()
             if error.code not in {"E_SOURCE_BUSY"}:
                 raise
+            if error.family:
+                last_busy_family = error.family
         except BaseException:
-            temporary.cleanup()
+            if temporary is not None:
+                temporary.cleanup()
             raise
         else:
-            temporary.cleanup()
-    raise DiagnosticError.source_busy(attempts=maximum_attempts, family=family_names, provider=provider)
+            if temporary is not None:
+                temporary.cleanup()
+    raise DiagnosticError.source_busy(
+        attempts=maximum_attempts,
+        family=last_busy_family,
+        provider=provider,
+    )
 
 
 def snapshot_sqlite_family(
@@ -1288,6 +1717,36 @@ def private_sqlite_connection(
 
 
 @contextlib.contextmanager
+def private_sqlite_connection_live_wal_cow(
+    database: str | os.PathLike[str],
+    *,
+    root: str | os.PathLike[str],
+    bounds: Bounds = DEFAULT_BOUNDS,
+    attempts: int | None = None,
+    hook: AttemptHook | None = None,
+    provider: str | None = None,
+) -> Iterator[sqlite3.Connection]:
+    """Yield a private Darwin/APFS clone plus validated live-WAL prefix.
+
+    The implementation import is intentionally lazy: ``sqlite_cow`` reuses
+    descriptor helpers from this module, while unsupported installed hosts must
+    still be able to import the stdlib-only runtime normally.
+    """
+
+    from .sqlite_cow import private_sqlite_connection_live_wal_cow_impl
+
+    with private_sqlite_connection_live_wal_cow_impl(
+        database,
+        root=root,
+        bounds=bounds,
+        attempts=attempts,
+        hook=hook,
+        provider=provider,
+    ) as connection:
+        yield connection
+
+
+@contextlib.contextmanager
 def query_only_live_sqlite(
     database: str | os.PathLike[str],
     *,
@@ -1300,31 +1759,129 @@ def query_only_live_sqlite(
     >1GiB). The main file is opened no-follow first and SQLite receives only the
     process-local descriptor path, closing the validation-to-open pathname race.
     Live sidecars are refused because a descriptor URI cannot safely preserve
-    SQLite's basename-based WAL/SHM family lookup.
+    SQLite's basename-based WAL/SHM family lookup. Before yielding, the helper
+    establishes a read transaction; that pinned SQLite snapshot is the point at
+    which later legal source writes are assigned to the next reader run.
     """
 
     safe, base = require_regular_no_symlinks(database, root)
-    if os.path.exists(f"{safe}-journal") or os.path.lexists(f"{safe}-journal"):
-        raise DiagnosticError("E_SQLITE_HOT_JOURNAL", provider=provider)
-    # A descriptor URI pins the main inode, but SQLite derives sidecar names from
-    # the URI path. Refuse live sidecars rather than silently omit committed WAL.
-    for suffix in ("-wal", "-shm"):
-        member = f"{safe}{suffix}"
-        if not os.path.lexists(member):
-            continue
-        try:
-            mode = os.lstat(member).st_mode
-        except OSError as error:
-            raise DiagnosticError("E_SOURCE_BUSY", provider=provider) from error
-        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-            raise DiagnosticError.unsafe_path()
+    try:
+        initially_validated = _fingerprint(os.lstat(safe))
+    except OSError as error:
+        raise DiagnosticError("E_SOURCE_BUSY", provider=provider) from error
+    descriptor = _open_no_follow(safe, base)
+    expected = _fingerprint(os.fstat(descriptor))
+    if expected != initially_validated:
+        os.close(descriptor)
         raise DiagnosticError.source_busy(
-            family=(os.path.basename(member),),
+            attempts=0,
+            family=(os.path.basename(safe),),
             provider=provider,
         )
 
-    descriptor = _open_no_follow(safe, base)
-    expected = _fingerprint(os.fstat(descriptor))
+    def reject_live_sidecars() -> None:
+        present: dict[str, str] = {}
+        # Validate every present sidecar before classifying the family. Unsafe
+        # symlink/non-regular members take precedence over advisory diagnostics.
+        for suffix in ("-journal", "-wal", "-shm"):
+            member = f"{safe}{suffix}"
+            if not os.path.lexists(member):
+                continue
+            try:
+                mode = os.lstat(member).st_mode
+            except OSError as error:
+                raise DiagnosticError.source_busy(
+                    attempts=0,
+                    family=(os.path.basename(member),),
+                    provider=provider,
+                ) from error
+            if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+                raise DiagnosticError.unsafe_path()
+            require_regular_no_symlinks(member, base)
+            present[suffix] = os.path.basename(member)
+        if "-journal" in present:
+            raise DiagnosticError(
+                "E_SQLITE_HOT_JOURNAL",
+                provider=provider,
+                attempts=0,
+                family=(present["-journal"],),
+            )
+        live_family = tuple(present[suffix] for suffix in ("-wal", "-shm") if suffix in present)
+        if live_family:
+            # A descriptor URI pins the main inode, but SQLite derives sidecar
+            # names from the URI path. Refuse live sidecars rather than omit
+            # committed WAL.
+            raise DiagnosticError(
+                "E_SQLITE_LIVE_WAL",
+                provider=provider,
+                attempts=0,
+                family=live_family,
+            )
+
+    def verify_main_entry() -> None:
+        verification = _open_no_follow(safe, base)
+        try:
+            if _fingerprint(os.fstat(verification)) != expected:
+                raise DiagnosticError.source_busy(
+                    attempts=0,
+                    family=(os.path.basename(safe),),
+                    provider=provider,
+                )
+        finally:
+            os.close(verification)
+
+    def reject_persistent_wal_header() -> None:
+        """Refuse a WAL-mode main before SQLite can recreate source sidecars.
+
+        SQLite persists WAL mode in file-header read/write version bytes 18-19.
+        A read transaction against a writable source directory may create a new
+        ``-wal``/``-shm`` pair even when the prior pair was removed normally.
+        This oversized live helper therefore must not connect to that source at
+        all; the private COW backend is the only safe WAL-mode path.
+        """
+
+        try:
+            if hasattr(os, "pread"):
+                first = os.pread(descriptor, 100, 0)
+                second = os.pread(descriptor, 100, 0)
+            else:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                first = os.read(descriptor, 100)
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                second = os.read(descriptor, 100)
+                os.lseek(descriptor, 0, os.SEEK_SET)
+        except OSError as error:
+            raise DiagnosticError.source_busy(
+                attempts=0,
+                family=(os.path.basename(safe),),
+                provider=provider,
+            ) from error
+        if first != second:
+            raise DiagnosticError.source_busy(
+                attempts=0,
+                family=(os.path.basename(safe),),
+                provider=provider,
+            )
+        if (
+            len(first) >= 20
+            and first[:16] == b"SQLite format 3\x00"
+            and (first[18] == 2 or first[19] == 2)
+        ):
+            raise DiagnosticError(
+                "E_SQLITE_LIVE_WAL",
+                provider=provider,
+                attempts=0,
+                family=(os.path.basename(safe),),
+            )
+
+    try:
+        reject_live_sidecars()
+        verify_main_entry()
+        reject_persistent_wal_header()
+        verify_main_entry()
+    except BaseException:
+        os.close(descriptor)
+        raise
     descriptor_path = next(
         (
             candidate
@@ -1341,22 +1898,27 @@ def query_only_live_sqlite(
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(uri, uri=True)
-        # Detect a persistent rename/replacement during sqlite3.connect. The
-        # connection itself is already pinned to ``descriptor`` and therefore
-        # never follows the replacement.
-        verification = _open_no_follow(safe, base)
-        try:
-            if _fingerprint(os.fstat(verification)) != expected:
-                raise DiagnosticError.source_busy(
-                    family=(os.path.basename(safe),),
-                    provider=provider,
-                )
-        finally:
-            os.close(verification)
+        # Detect family changes during sqlite3.connect. The connection itself
+        # is already pinned to ``descriptor`` and never follows a replacement,
+        # but a newly created source WAL would otherwise be invisible through
+        # the descriptor URI.
+        reject_live_sidecars()
+        verify_main_entry()
         connection.execute("PRAGMA query_only=ON")
         value = connection.execute("PRAGMA query_only").fetchone()
         if value is None or value[0] != 1:
             raise DiagnosticError("E_INVARIANT", provider=provider)
+        reject_live_sidecars()
+        verify_main_entry()
+        # Establish the SQLite read snapshot before returning control. The
+        # descriptor and SQLite transaction are the linearization boundary:
+        # a sidecar that appears before this point is caught by the checks
+        # below, while a legal write after it belongs to a later source state
+        # and cannot change the active read transaction.
+        connection.execute("BEGIN")
+        connection.execute("SELECT COUNT(*) FROM sqlite_schema").fetchone()
+        reject_live_sidecars()
+        verify_main_entry()
         yield connection
     finally:
         if connection is not None:

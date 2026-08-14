@@ -14,6 +14,12 @@ _CEILINGS: dict[str, int] = {
     "transcript_records": 50_000,
     "record_bytes": 16 * 1024 * 1024,
     "sqlite_snapshot_bytes": 256 * 1024 * 1024,
+    # Darwin/APFS clone snapshots account logical size separately from the
+    # bounded WAL prefix copied into private scratch (#263).
+    "sqlite_cow_logical_bytes": 2 * 1024 * 1024 * 1024,
+    "sqlite_wal_bytes": 256 * 1024 * 1024,
+    "sqlite_wal_frames": 524_288,
+    "sqlite_snapshot_deadline_ms": 30_000,
     "source_read_bytes": 256 * 1024 * 1024,
     "normalized_turns": 2_000,
     "normalized_content_bytes": 8 * 1024 * 1024,
@@ -72,6 +78,10 @@ class Bounds:
     transcript_records: int = _CEILINGS["transcript_records"]
     record_bytes: int = _CEILINGS["record_bytes"]
     sqlite_snapshot_bytes: int = _CEILINGS["sqlite_snapshot_bytes"]
+    sqlite_cow_logical_bytes: int = _CEILINGS["sqlite_cow_logical_bytes"]
+    sqlite_wal_bytes: int = _CEILINGS["sqlite_wal_bytes"]
+    sqlite_wal_frames: int = _CEILINGS["sqlite_wal_frames"]
+    sqlite_snapshot_deadline_ms: int = _CEILINGS["sqlite_snapshot_deadline_ms"]
     # Aggregate admitted source payload for one list/show (not output size).
     # Stability verification may re-read those same bytes without charging them again.
     source_read_bytes: int = _CEILINGS["source_read_bytes"]
@@ -154,6 +164,40 @@ class ReadBudget:
 
                 raise DiagnosticError.limit_exceeded()
             setattr(self, field_name, current + amount)
+
+    def commit_provisional(self, baseline: "ReadBudget", provisional: "ReadBudget") -> None:
+        """Fold verified provisional charges (vs ``baseline``) into this budget.
+
+        A single lock acquisition covers all three counters, so a concurrent
+        charge cannot interleave between the record/byte updates (the reviewer
+        concern for the previous three separate ``consume_*`` calls).
+        """
+
+        records_delta = provisional.records - baseline.records
+        transcript_delta = provisional.transcript_records_read - baseline.transcript_records_read
+        bytes_delta = provisional.bytes_read - baseline.bytes_read
+        with self._lock:
+            if self.records + records_delta > min(
+                self.limits.scanned_records, DEFAULT_BOUNDS.scanned_records
+            ):
+                from .diagnostics import DiagnosticError
+
+                raise DiagnosticError.limit_exceeded()
+            if self.transcript_records_read + transcript_delta > min(
+                self.limits.transcript_records, DEFAULT_BOUNDS.transcript_records
+            ):
+                from .diagnostics import DiagnosticError
+
+                raise DiagnosticError.limit_exceeded()
+            if self.bytes_read + bytes_delta > min(
+                self.limits.source_read_bytes, DEFAULT_BOUNDS.source_read_bytes
+            ):
+                from .diagnostics import DiagnosticError
+
+                raise DiagnosticError.limit_exceeded()
+            self.records += records_delta
+            self.transcript_records_read += transcript_delta
+            self.bytes_read += bytes_delta
 
 
 # Ensure the dataclass field set matches the ceiling table (fail closed at import).
