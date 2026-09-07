@@ -78,3 +78,9 @@ Antigravity and OpenCode do not currently provide a compatible public marketplac
 ## Security
 
 Recovered source text is untrusted. Review and minimize the generated handoff before pasting it into a fresh destination session. See [SECURITY.md](SECURITY.md).
+
+---
+
+## Support
+
+If this project saved you some time, you can [buy me a coffee](https://buymeacoffee.com/iml1s).
