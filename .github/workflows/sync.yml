@@ -54,7 +54,10 @@ jobs:
             fi
           fi
       - run: python3 -m unittest discover -s tests -q
-      - run: git diff --check
+      # The mirror carries release bytes verbatim, and upstream release ZIPs may
+      # legitimately contain CRLF files, so CR before EOL is not whitespace damage
+      # here; the check still rejects trailing spaces/tabs and other damage.
+      - run: git -c core.whitespace=cr-at-eol diff --check
       - name: Commit synchronized catalog
         id: publish
         run: |

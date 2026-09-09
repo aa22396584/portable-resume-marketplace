@@ -455,6 +455,15 @@ class SynchronizationSecurityTests(unittest.TestCase):
         self.assertIn("git add --all -- .grok-plugin", workflow)
         self.assertIn("[ -e .grok-plugin ]", workflow)
 
+    def test_workflows_whitespace_check_tolerates_release_crlf(self):
+        # Release ZIPs are mirrored byte-for-byte and may carry CRLF files
+        # (v0.4.4 does), so CR before EOL must not fail the whitespace gate.
+        for name in ("sync.yml", "ci.yml"):
+            with self.subTest(workflow=name):
+                workflow = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+                self.assertIn("git -c core.whitespace=cr-at-eol diff --check", workflow)
+                self.assertNotIn("- run: git diff --check\n", workflow)
+
     def test_grok_plugin_root_archive_is_synchronized(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
