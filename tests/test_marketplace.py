@@ -278,6 +278,19 @@ class MarketplaceTests(unittest.TestCase):
             readme,
         )
 
+    def test_readme_grok_install_uses_bare_plugin_name(self):
+        # grok 1.0.13 parses `name@ref` as a git ref; after `marketplace add`
+        # the catalog plugin is installed by its bare name.
+        for readme in (
+            (ROOT / "README.md").read_text(encoding="utf-8"),
+            SYNC._readme("0.4.4", "v0.4.4"),
+        ):
+            self.assertIn("grok plugin marketplace add ImL1s/portable-resume-marketplace", readme)
+            self.assertNotIn("portable-resume@portable-resume-marketplace", readme)
+        generated = SYNC._readme("0.4.4", "v0.4.4")
+        self.assertIn("grok plugin install portable-resume --trust", generated)
+        self.assertIn("plugins/grok/portable-resume", generated)
+
     def test_repository_contains_pinned_release_index(self):
         hashes = tree_hashes(ROOT)
         self.assertIn("release-index.json", hashes)

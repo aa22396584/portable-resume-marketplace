@@ -48,12 +48,14 @@ qwen extensions sources add ImL1s/portable-resume-marketplace
 qwen extensions install ImL1s/portable-resume-marketplace:portable-resume --consent --scope user
 ```
 
-### Grok CLI
+### Grok Build
 
 ```bash
 grok plugin marketplace add ImL1s/portable-resume-marketplace
-grok plugin install portable-resume@portable-resume-marketplace --trust
+grok plugin install portable-resume --trust
 ```
+
+Grok reads `.grok-plugin/marketplace.json`, which points at the Grok plugin tree under `plugins/grok/portable-resume` (manifest `.grok-plugin/plugin.json`) once an upstream release that ships that layout (0.4.4 or later) has been synchronized. Until then the catalog has no Grok-specific entry and Grok falls back to the Claude-compatible `.claude-plugin/marketplace.json` tree.
 
 ### Kimi Code CLI
 
