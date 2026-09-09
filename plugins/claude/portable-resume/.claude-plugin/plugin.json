@@ -1,16 +1,18 @@
 {
   "author": {
-    "name": "portable-resume-skills contributors"
+    "name": "portable-resume-skills contributors",
+    "url": "https://github.com/ImL1s"
   },
   "description": "Offline, inert context migration across supported coding agents",
   "homepage": "https://github.com/ImL1s/resume-skills",
   "keywords": [
     "context-migration",
     "agent-skills",
-    "offline"
+    "offline",
+    "portable-resume"
   ],
   "license": "Apache-2.0",
   "name": "portable-resume",
   "repository": "https://github.com/ImL1s/resume-skills",
-  "version": "0.4.3"
+  "version": "0.4.4"
 }

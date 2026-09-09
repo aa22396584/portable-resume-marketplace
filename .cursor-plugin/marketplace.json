@@ -4,7 +4,8 @@
   },
   "name": "portable-resume",
   "owner": {
-    "name": "portable-resume-skills contributors"
+    "name": "portable-resume-skills contributors",
+    "url": "https://github.com/ImL1s"
   },
   "plugins": [
     {

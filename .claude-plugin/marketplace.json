@@ -1,18 +1,24 @@
 {
+  "$schema": "https://code.claude.com/schemas/marketplace.json",
   "description": "Offline, inert context migration across supported coding agents",
   "name": "portable-resume",
   "owner": {
-    "name": "portable-resume-skills contributors"
+    "name": "portable-resume-skills contributors",
+    "url": "https://github.com/ImL1s"
   },
   "plugins": [
     {
       "author": {
-        "name": "portable-resume-skills contributors"
+        "name": "portable-resume-skills contributors",
+        "url": "https://github.com/ImL1s"
       },
       "description": "Offline, inert context migration across supported coding agents",
+      "displayName": "Portable Resume",
+      "license": "Apache-2.0",
       "name": "portable-resume",
+      "repository": "https://github.com/ImL1s/resume-skills",
       "source": "./plugins/claude/portable-resume",
-      "version": "0.4.3"
+      "version": "0.4.4"
     }
   ]
 }
