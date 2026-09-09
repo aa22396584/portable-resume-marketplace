@@ -16,11 +16,26 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-HOSTS = {
+# Hosts synchronized from marketplace archives on every release.
+MARKETPLACE_HOSTS = {
     "claude": (ROOT / ".claude-plugin" / "marketplace.json", ".claude-plugin"),
     "codex": (ROOT / ".agents" / "plugins" / "marketplace.json", ".codex-plugin"),
     "cursor": (ROOT / ".cursor-plugin" / "marketplace.json", ".cursor-plugin"),
 }
+# Grok is synchronized from its plugin-root archive only when that archive
+# carries .grok-plugin/plugin.json (upstream 0.4.4+); the committed tree is
+# therefore asserted only when release-index.json records the grok package.
+GROK_HOST = ("grok", (ROOT / ".grok-plugin" / "marketplace.json", ".grok-plugin"))
+
+
+def synced_hosts(index: dict) -> dict[str, tuple[Path, str]]:
+    hosts = dict(MARKETPLACE_HOSTS)
+    if "grok" in index["packages"]:
+        hosts[GROK_HOST[0]] = GROK_HOST[1]
+    return hosts
+
+
+HOSTS = synced_hosts(json.loads((ROOT / "release-index.json").read_text(encoding="utf-8")))
 SYNC_SPEC = importlib.util.spec_from_file_location(
     "portable_resume_marketplace_sync",
     ROOT / "scripts" / "sync_release.py",
@@ -44,15 +59,50 @@ def zip_payload(entries: list[tuple[str | zipfile.ZipInfo, bytes]]) -> bytes:
     return buffer.getvalue()
 
 
+def grok_plugin_manifest(version: str) -> bytes:
+    return json.dumps(
+        {
+            "name": "portable-resume",
+            "version": version,
+            "description": "synthetic grok manifest",
+            "author": {"name": "synthetic", "url": "https://example.invalid/author"},
+            "license": "Apache-2.0",
+            "homepage": "https://example.invalid/home",
+            "repository": "https://example.invalid/repo",
+            "keywords": ["synthetic"],
+            "skills": "./skills/",
+        },
+        sort_keys=True,
+    ).encode()
+
+
 def build_release_assets(
     root: Path,
     version: str,
     *,
     marker: str = "stable",
     malformed_host: str | None = None,
+    grok_layout: str | None = "grok-plugin",
 ) -> Path:
+    """Write synthetic release assets.
+
+    ``grok_layout`` selects the Grok archive shape: ``"grok-plugin"`` (manifest
+    at .grok-plugin/plugin.json, upstream 0.4.4+), ``"legacy"`` (root
+    plugin.json only, upstream <= 0.4.3), or ``None`` (no Grok asset at all).
+    """
     root.mkdir(parents=True, exist_ok=True)
     payloads: dict[str, bytes] = {}
+    if grok_layout is not None:
+        manifest_path = (
+            ".grok-plugin/plugin.json" if grok_layout == "grok-plugin" else "plugin.json"
+        )
+        payloads[f"portable-resume-{version}-grok-plugin.zip"] = zip_payload(
+            [
+                (manifest_path, grok_plugin_manifest(version)),
+                ("skills/resume-demo/SKILL.md", f"grok:{marker}".encode()),
+                ("assets/icon.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 16),
+            ]
+        )
     catalog_paths = {
         "claude": ".claude-plugin/marketplace.json",
         "codex": ".agents/plugins/marketplace.json",
@@ -149,9 +199,33 @@ class MarketplaceTests(unittest.TestCase):
         )
 
     def test_release_index_has_sha256_for_all_packages(self):
-        self.assertEqual(set(self.index["packages"]), {"claude", "codex", "cursor", "kimi"})
+        packages = set(self.index["packages"])
+        required = {"claude", "codex", "cursor", "kimi"}
+        self.assertTrue(required <= packages, packages)
+        self.assertTrue(packages <= required | {"grok"}, packages)
         for value in self.index["packages"].values():
             self.assertRegex(value["sha256"], r"^[0-9a-f]{64}$")
+
+    def test_grok_tree_matches_release_index(self):
+        # Fail closed both ways: a synced grok package must have its tree and
+        # catalog, and an unsynced release must leave no stale grok tree behind.
+        tree = ROOT / "plugins" / "grok" / "portable-resume"
+        catalog_path, manifest_dir = GROK_HOST[1]
+        if "grok" in self.index["packages"]:
+            manifest = read_json(tree / manifest_dir / "plugin.json")
+            self.assertEqual(manifest["name"], "portable-resume")
+            self.assertEqual(manifest["version"], self.version)
+            self.assertEqual(manifest["skills"], "./skills/")
+            catalog = read_json(catalog_path)
+            self.assertEqual(catalog["plugins"][0]["source"], "./plugins/grok/portable-resume")
+            self.assertEqual(catalog["plugins"][0]["version"], self.version)
+            self.assertEqual(
+                self.index["packages"]["grok"]["asset"],
+                f"portable-resume-{self.version}-grok-plugin.zip",
+            )
+        else:
+            self.assertFalse(tree.exists(), tree)
+            self.assertFalse(catalog_path.exists(), catalog_path)
 
     def test_tree_has_no_symlinks_or_private_absolute_paths(self):
         for path in ROOT.rglob("*"):
@@ -363,6 +437,107 @@ class SynchronizationSecurityTests(unittest.TestCase):
         )
         self.assertIn('git show "$tag:release-index.json"', workflow)
         self.assertIn('cmp -s "$tagged_index" release-index.json', workflow)
+        # The grok catalog is staged only when present or tracked, so the
+        # daily sync of a pre-0.4.4 release does not fail on a missing pathspec.
+        self.assertIn("git add --all -- .grok-plugin", workflow)
+        self.assertIn("[ -e .grok-plugin ]", workflow)
+
+    def test_grok_plugin_root_archive_is_synchronized(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            assets = build_release_assets(base / "assets", "0.4.4")
+            target = base / "target"
+            with mock.patch.object(SYNC, "ROOT", target):
+                SYNC.synchronize("v0.4.4", assets)
+            tree = target / "plugins" / "grok" / "portable-resume"
+            manifest = read_json(tree / ".grok-plugin" / "plugin.json")
+            self.assertEqual(manifest["version"], "0.4.4")
+            self.assertEqual(
+                (tree / "skills" / "resume-demo" / "SKILL.md").read_bytes(),
+                b"grok:stable",
+            )
+            self.assertTrue((tree / "assets" / "icon.png").is_file())
+            self.assertFalse((tree / "plugin.json").exists())
+            catalog = read_json(target / ".grok-plugin" / "marketplace.json")
+            self.assertEqual(catalog["name"], "portable-resume")
+            self.assertEqual(catalog["owner"], manifest["author"])
+            plugin = catalog["plugins"][0]
+            self.assertEqual(plugin["name"], "portable-resume")
+            self.assertEqual(plugin["source"], "./plugins/grok/portable-resume")
+            self.assertEqual(plugin["version"], "0.4.4")
+            self.assertEqual(plugin["license"], "Apache-2.0")
+            self.assertEqual(plugin["repository"], manifest["repository"])
+            index = read_json(target / "release-index.json")
+            self.assertEqual(
+                index["packages"]["grok"]["asset"],
+                "portable-resume-0.4.4-grok-plugin.zip",
+            )
+            self.assertEqual(
+                set(index["packages"]), {"claude", "codex", "cursor", "kimi", "grok"}
+            )
+
+    def test_legacy_or_missing_grok_archive_is_skipped_without_stale_tree(self):
+        for grok_layout in ("legacy", None):
+            with self.subTest(grok_layout=grok_layout), tempfile.TemporaryDirectory() as temp:
+                base = Path(temp)
+                modern = build_release_assets(base / "modern", "0.4.4")
+                older = build_release_assets(
+                    base / "older", "0.4.3", grok_layout=grok_layout
+                )
+                target = base / "target"
+                with mock.patch.object(SYNC, "ROOT", target):
+                    SYNC.synchronize("v0.4.4", modern)
+                    self.assertTrue((target / "plugins" / "grok").is_dir())
+                    SYNC.synchronize("v0.4.3", older, allow_downgrade=True)
+                index = read_json(target / "release-index.json")
+                self.assertEqual(index["tag"], "v0.4.3")
+                self.assertNotIn("grok", index["packages"])
+                self.assertFalse((target / "plugins" / "grok").exists())
+                self.assertFalse((target / ".grok-plugin").exists())
+
+    def test_legacy_grok_archive_keeps_same_version_sync_byte_identical(self):
+        # A pre-0.4.4 release re-synchronized daily must not diverge just
+        # because the grok archive is now downloaded and inspected.
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            legacy = build_release_assets(base / "legacy", "0.4.3", grok_layout="legacy")
+            target = base / "target"
+            with mock.patch.object(SYNC, "ROOT", target):
+                SYNC.synchronize("v0.4.3", legacy)
+                first = tree_hashes(target)
+                SYNC.synchronize("v0.4.3", legacy)
+                second = tree_hashes(target)
+            self.assertEqual(first, second)
+            self.assertNotIn("grok", read_json(target / "release-index.json")["packages"])
+
+    def test_grok_manifest_version_mismatch_fails_before_repository_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            assets = build_release_assets(base / "assets", "0.4.4")
+            tampered = zip_payload(
+                [
+                    (".grok-plugin/plugin.json", grok_plugin_manifest("9.9.9")),
+                    ("skills/resume-demo/SKILL.md", b"grok:stable"),
+                ]
+            )
+            name = "portable-resume-0.4.4-grok-plugin.zip"
+            (assets / name).write_bytes(tampered)
+            lines = [
+                line
+                for line in (assets / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+                if not line.endswith(f"  {name}")
+            ]
+            lines.append(f"{hashlib.sha256(tampered).hexdigest()}  {name}")
+            (assets / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            target = base / "target"
+            sentinel = target / "plugins" / "claude" / "portable-resume" / "sentinel.txt"
+            sentinel.parent.mkdir(parents=True)
+            sentinel.write_text("keep", encoding="utf-8")
+            with mock.patch.object(SYNC, "ROOT", target):
+                with self.assertRaisesRegex(ValueError, "name/version does not match"):
+                    SYNC.synchronize("v0.4.4", assets)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+            self.assertFalse((target / "plugins" / "grok").exists())
 
 
 if __name__ == "__main__":

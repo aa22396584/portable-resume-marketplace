@@ -19,7 +19,14 @@ from typing import Any
 
 REPO = "ImL1s/resume-skills"
 ROOT = Path(__file__).resolve().parents[1]
+# Hosts whose upstream archive is a marketplace tree (catalog + plugins/portable-resume).
 HOSTS = ("claude", "codex", "cursor")
+# Grok ships a plugin-root archive. It is synchronized only when the archive
+# carries the Grok Build manifest layout (upstream 0.4.4+); older releases with
+# a root plugin.json are skipped so re-synchronizing them stays byte-identical.
+GROK_HOST = "grok"
+GROK_MANIFEST = PurePosixPath(".grok-plugin/plugin.json")
+DESCRIPTION = "Offline, inert context migration across supported coding agents"
 MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 192 * 1024 * 1024
@@ -153,7 +160,35 @@ def _catalog_path(host: str) -> Path:
         "claude": ROOT / ".claude-plugin" / "marketplace.json",
         "codex": ROOT / ".agents" / "plugins" / "marketplace.json",
         "cursor": ROOT / ".cursor-plugin" / "marketplace.json",
+        "grok": ROOT / ".grok-plugin" / "marketplace.json",
     }[host]
+
+
+def _grok_catalog(extracted: Path, version: str) -> JsonObject:
+    """Build the Grok Build marketplace catalog from the plugin-root manifest."""
+
+    manifest = _read_json(extracted / Path(*GROK_MANIFEST.parts))
+    if manifest.get("name") != "portable-resume" or manifest.get("version") != version:
+        raise ValueError("Grok plugin manifest name/version does not match the release")
+    author = manifest.get("author")
+    if not isinstance(author, dict) or not isinstance(author.get("name"), str):
+        raise ValueError("Grok plugin manifest author must be an object with a name")
+    plugin: JsonObject = {
+        "name": "portable-resume",
+        "description": manifest.get("description", DESCRIPTION),
+        "version": version,
+        "source": f"./plugins/{GROK_HOST}/portable-resume",
+        "author": author,
+    }
+    for key in ("homepage", "repository", "license", "keywords"):
+        if key in manifest:
+            plugin[key] = manifest[key]
+    return {
+        "name": "portable-resume",
+        "description": manifest.get("description", DESCRIPTION),
+        "owner": author,
+        "plugins": [plugin],
+    }
 
 
 def _rewrite_catalog(host: str, extracted: Path) -> JsonObject:
@@ -240,15 +275,29 @@ def _guard_release_transition(
             )
 
 
-def _replace_tree(source: Path, destination: Path) -> None:
+def _guard_inside_root(destination: Path) -> None:
     resolved_root = ROOT.resolve()
     resolved_destination = destination.resolve()
     if resolved_root not in resolved_destination.parents:
         raise ValueError(f"destination escapes repository root: {destination}")
+
+
+def _replace_tree(source: Path, destination: Path) -> None:
+    _guard_inside_root(destination)
     if destination.exists():
         shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, destination)
+
+
+def _remove_tree(destination: Path) -> None:
+    """Remove a stale synced tree or catalog that the current release lacks."""
+
+    _guard_inside_root(destination)
+    if destination.is_dir():
+        shutil.rmtree(destination)
+    elif destination.exists():
+        destination.unlink()
 
 
 def _readme(version: str, tag: str) -> str:
@@ -399,13 +448,16 @@ def synchronize(
         _verify(name, payload, checksums)
         payloads[host] = payload
 
-    _guard_release_transition(
-        resolved_tag,
-        packages,
-        allow_downgrade=allow_downgrade,
-    )
+    # The Grok plugin-root archive is optional: absent from older releases, and
+    # only adopted when it carries .grok-plugin/plugin.json (upstream 0.4.4+).
+    grok_name = f"portable-resume-{version}-{GROK_HOST}-plugin.zip"
+    grok_payload: bytes | None = None
+    if grok_name in checksums:
+        grok_payload = load(grok_name)
+        _verify(grok_name, grok_payload, checksums)
 
     catalogs: dict[str, JsonObject] = {}
+    grok_synced = False
     with tempfile.TemporaryDirectory(prefix="portable-resume-sync-") as temp:
         staging = Path(temp)
         for host in HOSTS:
@@ -420,15 +472,38 @@ def synchronize(
             shutil.copytree(plugin_root, staged_plugin)
             catalogs[host] = _rewrite_catalog(host, extracted)
 
+        if grok_payload is not None:
+            extracted = staging / "extracted" / GROK_HOST
+            _safe_extract(grok_payload, extracted)
+            if (extracted / Path(*GROK_MANIFEST.parts)).is_file():
+                if not (extracted / "skills").is_dir():
+                    raise ValueError(f"{grok_name} has no skills tree")
+                staged_plugin = staging / "plugins" / GROK_HOST / "portable-resume"
+                staged_plugin.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(extracted, staged_plugin)
+                catalogs[GROK_HOST] = _grok_catalog(extracted, version)
+                packages[GROK_HOST] = {"asset": grok_name, "sha256": checksums[grok_name]}
+                grok_synced = True
+
+        _guard_release_transition(
+            resolved_tag,
+            packages,
+            allow_downgrade=allow_downgrade,
+        )
+
         # Do not mutate the repository until every archive and catalog has
         # passed checksum, extraction, and schema validation.
-        for host in HOSTS:
+        synced_hosts = (*HOSTS, GROK_HOST) if grok_synced else HOSTS
+        for host in synced_hosts:
             _replace_tree(
                 staging / "plugins" / host / "portable-resume",
                 ROOT / "plugins" / host / "portable-resume",
             )
-        for host in HOSTS:
+        for host in synced_hosts:
             _write_json(_catalog_path(host), catalogs[host])
+        if not grok_synced:
+            _remove_tree(ROOT / "plugins" / GROK_HOST)
+            _remove_tree(_catalog_path(GROK_HOST).parent)
 
     base = f"https://github.com/{REPO}/releases/download/{resolved_tag}"
     _write_json(
@@ -439,7 +514,7 @@ def synchronize(
                 {
                     "id": "portable-resume",
                     "displayName": "Portable Resume",
-                    "description": "Offline, inert context migration across supported coding agents",
+                    "description": DESCRIPTION,
                     "source": f"{base}/{kimi_name}",
                 }
             ],

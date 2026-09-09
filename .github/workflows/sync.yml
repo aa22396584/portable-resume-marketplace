@@ -62,7 +62,13 @@ jobs:
           tag="v$version"
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add .claude-plugin .agents .cursor-plugin plugins kimi-marketplace.json release-index.json README.md
+          git add --all -- .claude-plugin .agents .cursor-plugin plugins kimi-marketplace.json release-index.json README.md
+          # The Grok catalog exists only once a release with the Grok Build
+          # manifest layout has been synchronized; stage it (or its removal)
+          # only when the path is present on disk or already tracked.
+          if [ -e .grok-plugin ] || git ls-files --error-unmatch .grok-plugin >/dev/null 2>&1; then
+            git add --all -- .grok-plugin
+          fi
           if ! git diff --cached --quiet; then
             git commit -m "release: synchronize $tag"
             git push origin HEAD:main
