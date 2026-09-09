@@ -363,6 +363,14 @@ grok plugin install portable-resume --trust
 
 Grok reads `.grok-plugin/marketplace.json`, which points at the Grok plugin tree under `plugins/grok/portable-resume` (manifest `.grok-plugin/plugin.json`) once an upstream release that ships that layout (0.4.4 or later) has been synchronized. Until then the catalog has no Grok-specific entry and Grok falls back to the Claude-compatible `.claude-plugin/marketplace.json` tree.
 
+### Antigravity CLI
+
+```bash
+agy plugin install https://github.com/ImL1s/portable-resume-marketplace/tree/main/plugins/claude/portable-resume
+```
+
+Antigravity has no Google-run marketplace, but the Antigravity CLI installs the Claude-Code plugin subtree of this repository directly from its tree URL (verified on agy 1.1.28, 2026-09-09: 17 skills land in `~/.gemini/config/plugins/portable-resume`). Only that exact URL works; the repository root URL, `owner/repo` shorthand, `#subdir` and `plugin@marketplace` are rejected. The release-attached `portable-resume-{version}-antigravity-plugin.zip` remains the offline route.
+
 ### Kimi Code CLI
 
 Inside Kimi Code CLI:
@@ -377,7 +385,7 @@ Or install the signed release artifact directly:
 /plugins install https://github.com/{REPO}/releases/download/{tag}/portable-resume-{version}-kimi-plugin.zip
 ```
 
-Antigravity and OpenCode do not currently provide a compatible public marketplace catalog. Use the host-specific archives from the [Portable Resume {tag} release](https://github.com/{REPO}/releases/tag/{tag}).
+OpenCode does not currently provide a compatible public marketplace catalog. Use the direct Skill archive from the [Portable Resume {tag} release](https://github.com/{REPO}/releases/tag/{tag}).
 
 ## Integrity and updates
 

@@ -291,6 +291,20 @@ class MarketplaceTests(unittest.TestCase):
         self.assertIn("grok plugin install portable-resume --trust", generated)
         self.assertIn("plugins/grok/portable-resume", generated)
 
+    def test_readme_documents_antigravity_cli_tree_url_route(self):
+        # agy 1.1.28 installs the Claude-Code plugin subtree from its GitHub tree
+        # URL; the root URL / shorthand / #subdir forms are rejected.
+        command = (
+            "agy plugin install https://github.com/ImL1s/portable-resume-marketplace"
+            "/tree/main/plugins/claude/portable-resume"
+        )
+        for readme in (
+            (ROOT / "README.md").read_text(encoding="utf-8"),
+            SYNC._readme("0.4.4", "v0.4.4"),
+        ):
+            self.assertIn(command, readme)
+            self.assertNotIn("Antigravity and OpenCode do not currently provide", readme)
+
     def test_repository_contains_pinned_release_index(self):
         hashes = tree_hashes(ROOT)
         self.assertIn("release-index.json", hashes)
