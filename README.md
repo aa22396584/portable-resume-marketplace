@@ -1,6 +1,6 @@
 # Portable Resume Marketplace
 
-Public, host-native catalogs for [Portable Resume](https://github.com/ImL1s/resume-skills) **0.4.4**.
+Public, host-native catalogs for [Portable Resume](https://github.com/ImL1s/resume-skills) **0.4.5**.
 The packaged readers run locally, use only Python's standard library, and emit inert, untrusted handoff text for a fresh session. They do not restore a live process or contact the network.
 
 Documentation:
@@ -63,7 +63,7 @@ Grok reads `.grok-plugin/marketplace.json`, which points at the Grok plugin tree
 agy plugin install https://github.com/ImL1s/portable-resume-marketplace/tree/main/plugins/claude/portable-resume
 ```
 
-Antigravity has no Google-run marketplace, but the Antigravity CLI installs the Claude-Code plugin subtree of this repository directly from its tree URL (verified on agy 1.1.28, 2026-09-09: 17 skills land in `~/.gemini/config/plugins/portable-resume`). Only that exact URL works; the repository root URL, `owner/repo` shorthand, `#subdir` and `plugin@marketplace` are rejected. The release-attached `portable-resume-0.4.4-antigravity-plugin.zip` remains the offline route.
+Antigravity has no Google-run marketplace, but the Antigravity CLI installs the Claude-Code plugin subtree of this repository directly from its tree URL (verified on agy 1.1.28, 2026-09-09: 17 skills land in `~/.gemini/config/plugins/portable-resume`). Only that exact URL works; the repository root URL, `owner/repo` shorthand, `#subdir` and `plugin@marketplace` are rejected. The release-attached `portable-resume-0.4.5-antigravity-plugin.zip` remains the offline route.
 
 ### Kimi Code CLI
 
@@ -76,10 +76,10 @@ Inside Kimi Code CLI:
 Or install the signed release artifact directly:
 
 ```text
-/plugins install https://github.com/ImL1s/resume-skills/releases/download/v0.4.4/portable-resume-0.4.4-kimi-plugin.zip
+/plugins install https://github.com/ImL1s/resume-skills/releases/download/v0.4.5/portable-resume-0.4.5-kimi-plugin.zip
 ```
 
-OpenCode does not currently provide a compatible public marketplace catalog. Use the direct Skill archive from the [Portable Resume v0.4.4 release](https://github.com/ImL1s/resume-skills/releases/tag/v0.4.4).
+OpenCode does not currently provide a compatible public marketplace catalog. Use the direct Skill archive from the [Portable Resume v0.4.5 release](https://github.com/ImL1s/resume-skills/releases/tag/v0.4.5).
 
 ## Integrity and updates
 

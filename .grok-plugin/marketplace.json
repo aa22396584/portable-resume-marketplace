@@ -9,7 +9,7 @@
     {
       "name": "portable-resume",
       "description": "Offline, inert context migration across supported coding agents",
-      "version": "0.4.4",
+      "version": "0.4.5",
       "source": "./plugins/grok/portable-resume",
       "author": {
         "name": "portable-resume-skills contributors",
