@@ -1,5 +1,10 @@
 # Portable Resume Marketplace
 
+> **Development home:** https://github.com/ImL1s/portable-resume-marketplace  
+> Please open issues and pull requests there.  
+> **Mirrors:** [Codeberg](https://codeberg.org/ImL1s/portable-resume-marketplace) · [GitLab](https://gitlab.com/aa22396584/portable-resume-marketplace)
+
+
 Public, host-native catalogs for [Portable Resume](https://github.com/ImL1s/resume-skills) **0.4.5**.
 The packaged readers run locally, use only Python's standard library, and emit inert, untrusted handoff text for a fresh session. They do not restore a live process or contact the network.
 
