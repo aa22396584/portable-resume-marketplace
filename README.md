@@ -70,7 +70,7 @@ Antigravity has no Google-run marketplace, but the Antigravity CLI installs the 
 Inside Kimi Code CLI:
 
 ```text
-/plugins marketplace https://raw.githubusercontent.com/ImL1s/portable-resume-marketplace/main/kimi-marketplace.json
+/plugins marketplace https://codeberg.org/ImL1s/portable-resume-marketplace/raw/branch/main/kimi-marketplace.json
 ```
 
 Or install the signed release artifact directly:
