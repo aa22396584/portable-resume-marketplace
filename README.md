@@ -1,3 +1,5 @@
+> **This repository has moved.** Development continues at https://github.com/aa22396584/portable-resume-marketplace (mirrors: GitLab · Codeberg).
+
 # Portable Resume Marketplace
 
 **Development, Issues & Pull Requests:**  
