@@ -18,7 +18,7 @@
       "List my recent local coding-agent sessions for this project and show the latest one.",
       "Import the context of my previous Claude Code session here without restoring a live process."
     ],
-    "developerName": "ImL1s",
+    "developerName": "aa22396584",
     "displayName": "Portable Resume",
     "logo": "./assets/logo.png",
     "longDescription": "Portable Resume migrates bounded context from your previous local coding-agent sessions into a fresh session. One resume skill per supported source (17 sources: Antigravity CLI, Claude Code, Cline, Codex CLI, Crush, Cursor, Gemini CLI, GitHub Copilot CLI, goose, Grok Build, Hermes Agent, Kimi CLI / Kimi Code CLI, OpenClaw, OpenCode, OpenHands, Pi agent, Qwen Code) reads that agent's own on-disk session store, selects the newest session recorded for the current working directory where the source records one (a session without a recorded directory may remain eligible, depending on the adapter, and OpenHands has no directory filter), and prints an inert, best-effort redacted markdown handoff that the destination agent reads as data and summarizes; during a skill invocation the host and its model provider receive that output directly. Everything runs locally with Python's standard library: the bundled reader never contacts the network, never invokes the source agent's CLI, never modifies the source store, and ships no MCP server, credentials, scheduler or background service. Recovered text is marked untrusted and stale, and redaction is best-effort rather than complete data-loss prevention. This is offline context migration, not live session restore.",

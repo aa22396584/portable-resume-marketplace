@@ -17,7 +17,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-REPO = "ImL1s/resume-skills"
+REPO = "aa22396584/resume-skills"
 ROOT = Path(__file__).resolve().parents[1]
 # Hosts whose upstream archive is a marketplace tree (catalog + plugins/portable-resume).
 HOSTS = ("claude", "codex", "cursor")
