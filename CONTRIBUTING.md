@@ -1,6 +1,6 @@
 # Contributing
 
-This repository mirrors signed Portable Resume release artifacts. Product changes belong in [ImL1s/resume-skills](https://github.com/ImL1s/resume-skills); do not edit generated plugin trees by hand.
+This repository mirrors signed Portable Resume release artifacts. Product changes belong in [ImL1s/resume-skills](https://github.com/aa22396584/resume-skills); do not edit generated plugin trees by hand.
 
 To validate a marketplace-only change:
 

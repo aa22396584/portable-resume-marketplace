@@ -195,7 +195,7 @@ class MarketplaceTests(unittest.TestCase):
         self.assertEqual(plugin["id"], "portable-resume")
         self.assertEqual(
             plugin["source"],
-            f"https://github.com/ImL1s/resume-skills/releases/download/{self.index['tag']}/{package}",
+            f"https://github.com/aa22396584/resume-skills/releases/download/{self.index['tag']}/{package}",
         )
 
     def test_release_index_has_sha256_for_all_packages(self):
@@ -273,7 +273,7 @@ class MarketplaceTests(unittest.TestCase):
             self.assertIn(f"/docs/i18n/{locale}.md", readme)
         self.assertIn(
             "qwen extensions install "
-            "ImL1s/portable-resume-marketplace:portable-resume "
+            "aa22396584/portable-resume-marketplace:portable-resume "
             "--consent --scope user",
             readme,
         )
@@ -285,7 +285,7 @@ class MarketplaceTests(unittest.TestCase):
             (ROOT / "README.md").read_text(encoding="utf-8"),
             SYNC._readme("0.4.4", "v0.4.4"),
         ):
-            self.assertIn("grok plugin marketplace add ImL1s/portable-resume-marketplace", readme)
+            self.assertIn("grok plugin marketplace add aa22396584/portable-resume-marketplace", readme)
             self.assertNotIn("portable-resume@portable-resume-marketplace", readme)
         generated = SYNC._readme("0.4.4", "v0.4.4")
         self.assertIn("grok plugin install portable-resume --trust", generated)
@@ -295,7 +295,7 @@ class MarketplaceTests(unittest.TestCase):
         # agy 1.1.28 installs the Claude-Code plugin subtree from its GitHub tree
         # URL; the root URL / shorthand / #subdir forms are rejected.
         command = (
-            "agy plugin install https://github.com/ImL1s/portable-resume-marketplace"
+            "agy plugin install https://github.com/aa22396584/portable-resume-marketplace"
             "/tree/main/plugins/claude/portable-resume"
         )
         for readme in (

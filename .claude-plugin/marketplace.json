@@ -4,19 +4,19 @@
   "name": "portable-resume",
   "owner": {
     "name": "portable-resume-skills contributors",
-    "url": "https://github.com/ImL1s"
+    "url": "https://github.com/aa22396584"
   },
   "plugins": [
     {
       "author": {
         "name": "portable-resume-skills contributors",
-        "url": "https://github.com/ImL1s"
+        "url": "https://github.com/aa22396584"
       },
       "description": "Offline, inert context migration across supported coding agents",
       "displayName": "Portable Resume",
       "license": "Apache-2.0",
       "name": "portable-resume",
-      "repository": "https://github.com/ImL1s/resume-skills",
+      "repository": "https://github.com/aa22396584/resume-skills",
       "source": "./plugins/claude/portable-resume",
       "version": "0.4.5"
     }

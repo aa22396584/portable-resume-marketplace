@@ -328,21 +328,21 @@ Documentation:
 ### Claude Code
 
 ```bash
-claude plugin marketplace add ImL1s/portable-resume-marketplace
+claude plugin marketplace add aa22396584/portable-resume-marketplace
 claude plugin install portable-resume@portable-resume --scope user
 ```
 
 ### Codex
 
 ```bash
-codex plugin marketplace add ImL1s/portable-resume-marketplace
+codex plugin marketplace add aa22396584/portable-resume-marketplace
 codex plugin add portable-resume@portable-resume
 ```
 
 ### Cursor Agent
 
 ```bash
-cursor-agent plugin marketplace add https://github.com/ImL1s/portable-resume-marketplace --git-ref main
+cursor-agent plugin marketplace add https://github.com/aa22396584/portable-resume-marketplace --git-ref main
 ```
 
 Then run `/plugin` in Cursor Agent, open **Marketplace**, search for `portable-resume`, and install it for user scope.
@@ -350,14 +350,14 @@ Then run `/plugin` in Cursor Agent, open **Marketplace**, search for `portable-r
 ### Qwen Code
 
 ```bash
-qwen extensions sources add ImL1s/portable-resume-marketplace
-qwen extensions install ImL1s/portable-resume-marketplace:portable-resume --consent --scope user
+qwen extensions sources add aa22396584/portable-resume-marketplace
+qwen extensions install aa22396584/portable-resume-marketplace:portable-resume --consent --scope user
 ```
 
 ### Grok Build
 
 ```bash
-grok plugin marketplace add ImL1s/portable-resume-marketplace
+grok plugin marketplace add aa22396584/portable-resume-marketplace
 grok plugin install portable-resume --trust
 ```
 
@@ -366,7 +366,7 @@ Grok reads `.grok-plugin/marketplace.json`, which points at the Grok plugin tree
 ### Antigravity CLI
 
 ```bash
-agy plugin install https://github.com/ImL1s/portable-resume-marketplace/tree/main/plugins/claude/portable-resume
+agy plugin install https://github.com/aa22396584/portable-resume-marketplace/tree/main/plugins/claude/portable-resume
 ```
 
 Antigravity has no Google-run marketplace, but the Antigravity CLI installs the Claude-Code plugin subtree of this repository directly from its tree URL (verified on agy 1.1.28, 2026-09-09: 17 skills land in `~/.gemini/config/plugins/portable-resume`). Only that exact URL works; the repository root URL, `owner/repo` shorthand, `#subdir` and `plugin@marketplace` are rejected. The release-attached `portable-resume-{version}-antigravity-plugin.zip` remains the offline route.
@@ -376,7 +376,7 @@ Antigravity has no Google-run marketplace, but the Antigravity CLI installs the 
 Inside Kimi Code CLI:
 
 ```text
-/plugins marketplace https://raw.githubusercontent.com/ImL1s/portable-resume-marketplace/main/kimi-marketplace.json
+/plugins marketplace https://raw.githubusercontent.com/aa22396584/portable-resume-marketplace/main/kimi-marketplace.json
 ```
 
 Or install the signed release artifact directly:

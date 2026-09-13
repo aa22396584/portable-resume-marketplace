@@ -96,7 +96,7 @@ _DEFAULT_HINTS: dict[str, str] = {
     "E_UNSAFE_PATH": (
         "Do not use an unsafe symlink/junction spelling or other non-regular path. For "
         "installer roots, select the physical Skill directory with --root, then retry. "
-        "See https://github.com/ImL1s/resume-skills/blob/main/docs/install-hosts.md"
+        "See https://github.com/aa22396584/resume-skills/blob/main/docs/install-hosts.md"
         "#windows-user-install-and-shared-skill-roots."
     ),
     "E_SQLITE_LIVE_WAL": (
@@ -114,7 +114,7 @@ _DEFAULT_HINTS: dict[str, str] = {
         "Ownership state or installed payload verification failed. Inspect or repair "
         "invalid state first. If this is specifically a missing shared-root claim, "
         "re-install every intended host claim together, then "
-        "verify each host separately. See https://github.com/ImL1s/resume-skills/blob/main/"
+        "verify each host separately. See https://github.com/aa22396584/resume-skills/blob/main/"
         "docs/install-hosts.md#windows-user-install-and-shared-skill-roots."
     ),
 }

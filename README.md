@@ -8,36 +8,36 @@ https://github.com/aa22396584/portable-resume-marketplace
 [Codeberg](https://codeberg.org/ImL1s/portable-resume-marketplace)
 
 
-Public, host-native catalogs for [Portable Resume](https://github.com/ImL1s/resume-skills) **0.4.5**.
+Public, host-native catalogs for [Portable Resume](https://github.com/aa22396584/resume-skills) **0.4.5**.
 The packaged readers run locally, use only Python's standard library, and emit inert, untrusted handoff text for a fresh session. They do not restore a live process or contact the network.
 
 Documentation:
-[English](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/en.md) ·
-[繁體中文](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/zh-TW.md) ·
-[简体中文](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/zh-CN.md) ·
-[日本語](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/ja.md) ·
-[한국어](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/ko.md) ·
-[Español](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/es.md) ·
-[Português](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/pt-BR.md) ·
-[Français](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/fr.md) ·
-[Deutsch](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/de.md) ·
-[Русский](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/ru.md) ·
-[العربية](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/ar.md) ·
-[हिन्दी](https://github.com/ImL1s/resume-skills/blob/main/docs/i18n/hi.md)
+[English](https://github.com/aa22396584/resume-skills/blob/main/docs/i18n/en.md) ·
+[繁體中文](https://github.com/aa22396584/resume-skills/blob/main/docs/i18n/zh-TW.md) ·
+[简体中文](https://github.com/aa22396584/resume-skills/blob/main/docs/i18n/zh-CN.md) ·
+[日本語](https://github.com/aa22396584/resume-skills/blob/main/docs/i18n/ja.md) ·
+[한국어](https://github.com/aa22396584/resume-skills/blob/main/docs/i18n/ko.md) ·
+[Español](https://github.com/aa22396584/resume-skills/blob/main/docs/i18n/es.md) ·
+[Português](https://github.com/aa22396584/resume-skills/blob/main/docs/i18n/pt-BR.md) ·
+[Français](https://github.com/aa22396584/resume-skills/blob/main/docs/i18n/fr.md) ·
+[Deutsch](https://github.com/aa22396584/resume-skills/blob/main/docs/i18n/de.md) ·
+[Русский](https://github.com/aa22396584/resume-skills/blob/main/docs/i18n/ru.md) ·
+[العربية](https://github.com/aa22396584/resume-skills/blob/main/docs/i18n/ar.md) ·
+[हिन्दी](https://github.com/aa22396584/resume-skills/blob/main/docs/i18n/hi.md)
 
 ## Install
 
 ### Claude Code
 
 ```bash
-claude plugin marketplace add ImL1s/portable-resume-marketplace
+claude plugin marketplace add aa22396584/portable-resume-marketplace
 claude plugin install portable-resume@portable-resume --scope user
 ```
 
 ### Codex
 
 ```bash
-codex plugin marketplace add ImL1s/portable-resume-marketplace
+codex plugin marketplace add aa22396584/portable-resume-marketplace
 codex plugin add portable-resume@portable-resume
 ```
 
@@ -52,14 +52,14 @@ Then run `/plugin` in Cursor Agent, open **Marketplace**, search for `portable-r
 ### Qwen Code
 
 ```bash
-qwen extensions sources add ImL1s/portable-resume-marketplace
-qwen extensions install ImL1s/portable-resume-marketplace:portable-resume --consent --scope user
+qwen extensions sources add aa22396584/portable-resume-marketplace
+qwen extensions install aa22396584/portable-resume-marketplace:portable-resume --consent --scope user
 ```
 
 ### Grok Build
 
 ```bash
-grok plugin marketplace add ImL1s/portable-resume-marketplace
+grok plugin marketplace add aa22396584/portable-resume-marketplace
 grok plugin install portable-resume --trust
 ```
 
@@ -84,10 +84,10 @@ Inside Kimi Code CLI:
 Or install the signed release artifact directly:
 
 ```text
-/plugins install https://github.com/ImL1s/resume-skills/releases/download/v0.4.5/portable-resume-0.4.5-kimi-plugin.zip
+/plugins install https://github.com/aa22396584/resume-skills/releases/download/v0.4.5/portable-resume-0.4.5-kimi-plugin.zip
 ```
 
-OpenCode does not currently provide a compatible public marketplace catalog. Use the direct Skill archive from the [Portable Resume v0.4.5 release](https://github.com/ImL1s/resume-skills/releases/tag/v0.4.5).
+OpenCode does not currently provide a compatible public marketplace catalog. Use the direct Skill archive from the [Portable Resume v0.4.5 release](https://github.com/aa22396584/resume-skills/releases/tag/v0.4.5).
 
 ## Integrity and updates
 

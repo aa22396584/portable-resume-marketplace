@@ -175,7 +175,7 @@ claimed by more than one destination host.
 If the `install-resume-skills` console script is available, run
 `install-resume-skills hosts` for per-host activation grammar. Otherwise see
 the project install guide:
-https://github.com/ImL1s/resume-skills/blob/main/docs/install-hosts.md
+https://github.com/aa22396584/resume-skills/blob/main/docs/install-hosts.md
 
 ## Verify before continuing
 
