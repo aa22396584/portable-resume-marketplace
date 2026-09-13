@@ -8,6 +8,8 @@ https://github.com/aa22396584/portable-resume-marketplace
 [Codeberg](https://codeberg.org/ImL1s/portable-resume-marketplace)
 
 
+> **Why this GitHub home?** Public development moved here from [`ImL1s/portable-resume-marketplace`](https://github.com/ImL1s/portable-resume-marketplace) because that GitHub account is currently restricted (anonymous visitors get 404 on the profile and many assets). This is the same project. Please open Issues and Pull Requests here.
+
 Public, host-native catalogs for [Portable Resume](https://github.com/aa22396584/resume-skills) **0.4.5**.
 The packaged readers run locally, use only Python's standard library, and emit inert, untrusted handoff text for a fresh session. They do not restore a live process or contact the network.
 
