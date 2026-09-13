@@ -1,8 +1,11 @@
 # Portable Resume Marketplace
 
-> **Development home:** https://github.com/ImL1s/portable-resume-marketplace  
-> Please open issues and pull requests there.  
-> **Mirrors:** [Codeberg](https://codeberg.org/ImL1s/portable-resume-marketplace) · [GitLab](https://gitlab.com/aa22396584/portable-resume-marketplace)
+**Development, Issues & Pull Requests:**  
+https://github.com/aa22396584/portable-resume-marketplace
+
+**Mirrors:**  
+[GitLab](https://gitlab.com/aa22396584/portable-resume-marketplace) ·
+[Codeberg](https://codeberg.org/ImL1s/portable-resume-marketplace)
 
 
 Public, host-native catalogs for [Portable Resume](https://github.com/ImL1s/resume-skills) **0.4.5**.
@@ -41,7 +44,7 @@ codex plugin add portable-resume@portable-resume
 ### Cursor Agent
 
 ```bash
-cursor-agent plugin marketplace add https://github.com/ImL1s/portable-resume-marketplace --git-ref main
+cursor-agent plugin marketplace add https://github.com/aa22396584/portable-resume-marketplace --git-ref main
 ```
 
 Then run `/plugin` in Cursor Agent, open **Marketplace**, search for `portable-resume`, and install it for user scope.
@@ -65,7 +68,7 @@ Grok reads `.grok-plugin/marketplace.json`, which points at the Grok plugin tree
 ### Antigravity CLI
 
 ```bash
-agy plugin install https://github.com/ImL1s/portable-resume-marketplace/tree/main/plugins/claude/portable-resume
+agy plugin install https://github.com/aa22396584/portable-resume-marketplace/tree/main/plugins/claude/portable-resume
 ```
 
 Antigravity has no Google-run marketplace, but the Antigravity CLI installs the Claude-Code plugin subtree of this repository directly from its tree URL (verified on agy 1.1.28, 2026-09-09: 17 skills land in `~/.gemini/config/plugins/portable-resume`). Only that exact URL works; the repository root URL, `owner/repo` shorthand, `#subdir` and `plugin@marketplace` are rejected. The release-attached `portable-resume-0.4.5-antigravity-plugin.zip` remains the offline route.
